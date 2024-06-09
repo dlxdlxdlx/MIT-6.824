@@ -49,8 +49,8 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 type LogEntry struct {
-	term int
-	data string
+	Term int
+	Data string
 }
 
 type logTopic string
@@ -74,9 +74,9 @@ const (
 	dWarn    logTopic = "WARN"
 )
 const (
-	heartbeatTimeout   = 100
+	heartbeatTimeout   = 70
 	minElectionTimeout = 150
-	maxElectionTimeout = 250
+	maxElectionTimeout = 300
 )
 
 type Role string
@@ -89,7 +89,7 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (2A, 2B, 2C).
+	// Your Data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	appCh          chan ApplyMsg
@@ -111,8 +111,8 @@ type Raft struct {
 }
 
 func (rf *Raft) BroadcastHeartBeat() {
-	DPrintf(dLeader, "S%v send AppendEntries ", rf.me)
-	rf.mu.Lock()
+	DPrintf(dLog2, "S%v send AppendEntries ", rf.me)
+	//rf.mu.Lock()
 	request := &AppendEntriesArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
@@ -123,10 +123,10 @@ func (rf *Raft) BroadcastHeartBeat() {
 		request.PrevLogTerm = -1
 		request.PrevLogIndex = -1
 	} else {
-		request.PrevLogIndex = rf.Entries[len(rf.Entries)].term
+		//request.PrevLogIndex = rf.Entries[len(rf.Entries)-1].Term
 		request.PrevLogIndex = len(rf.Entries) - 1
 	}
-	rf.mu.Unlock()
+	//rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -159,8 +159,8 @@ func (rf *Raft) persist() {
 	// e := labgob.NewEncoder(w)
 	// e.Encode(rf.xxx)
 	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	// Data := w.Bytes()
+	// rf.persister.SaveRaftState(Data)
 }
 
 // restore previously persisted state.
@@ -170,7 +170,7 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
+	// r := bytes.NewBuffer(Data)
 	// d := labgob.NewDecoder(r)
 	// var xxx
 	// var yyy
@@ -204,7 +204,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // RequestVoteArgs example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
+	// Your Data here (2A, 2B).
 	Term         int //candidate's Term
 	CandidateId  int // candidate requesting vote
 	LastLogIndex int
@@ -214,7 +214,7 @@ type RequestVoteArgs struct {
 // RequestVoteReply example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (2A).
+	// Your Data here (2A).
 	Term         int
 	VotedGranted bool
 }
@@ -223,23 +223,32 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	//DPrintf("{S %v}'s state: {state: %v, Term: %v, commitIndex: %v, lastApplied: %v}", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}",
+		rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
 	}
+	if request.Term == rf.currentTerm && rf.votedFor != -1 {
+		reply.Term, reply.VotedGranted = rf.currentTerm, false
+	}
 	if request.Term > rf.currentTerm {
 		rf.state = "follower"
-		rf.currentTerm, rf.votedFor = request.LastLogTerm, -1
+		rf.currentTerm, rf.votedFor = request.Term, request.CandidateId
+		DPrintf(dClient, "S%v vote for S%v", rf.me, request.CandidateId)
+		reply.Term, reply.VotedGranted = rf.currentTerm, true
+		return
 	}
-	if rf.Entries[len(rf.Entries)-1].term > request.LastLogTerm || (rf.Entries[len(rf.Entries)-1].term == request.LastLogTerm && len(rf.Entries) > request.LastLogIndex) {
+	if rf.Entries[len(rf.Entries)-1].Term > request.LastLogTerm || (rf.Entries[len(rf.Entries)-1].Term == request.LastLogTerm && len(rf.Entries) > request.LastLogIndex) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
+		return
 	}
 	rf.electionTimer.Reset(RandomElectionDuration())
 	DPrintf(dClient, "S%v vote for S%v", rf.me, request.CandidateId)
 	reply.Term, reply.VotedGranted = rf.currentTerm, true
-	return
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -365,10 +374,10 @@ type AppendEntriesReply struct {
 
 // AppendEntries 添加日志条目, 同时也可以作为心跳机制RPC调用
 func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
-	DPrintf(dClient, "S%v recv AppendEntries from S%v S%v", rf.me, request.LeaderId)
+	DPrintf(dClient, "S%v recv AppendEntries from S%v", rf.me, request.LeaderId)
 	rf.mu.Lock()
 	defer rf.mu.Lock()
-	//1. Reply false if term < currentTerm (§5.1)
+	//1. Reply false if Term < currentTerm (§5.1)
 	if request.Term < rf.currentTerm {
 		response.Term, response.Success = rf.currentTerm, false
 		return
@@ -388,7 +397,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		response.Term, response.Success = rf.currentTerm, true
 	}
 	//2. Reply false if log doesn’t contain an entry at prevLogIndex
-	//whose term matches prevLogTerm (§5.3)
+	//whose Term matches prevLogTerm (§5.3)
 	if request.PrevLogIndex != rf.GetPrevLogIndex() || request.PrevLogIndex == rf.GetPrevLogIndex() && request.PrevLogTerm != rf.GetPrevLogTerm() {
 		response.Term, response.Success = rf.currentTerm, false
 		return
@@ -397,7 +406,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	//   delete the existing entry and all that follow it (§5.3)
 	if rf.EntryConflict(request) {
 		for index, entry := range request.Entries {
-			if entry.term != rf.Entries[index].term {
+			if entry.Term != rf.Entries[index].Term {
 				rf.Entries = rf.Entries[:index]
 				rf.Entries = append(rf.Entries, request.Entries[index:]...)
 				response.MatchIndex = len(rf.Entries) - 1
@@ -418,7 +427,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	}
 }
 func (rf *Raft) EntryConflict(request *AppendEntriesArgs) bool {
-	if len(rf.Entries) > request.PrevLogIndex+1 || len(rf.Entries) == request.PrevLogIndex && rf.Entries[request.PrevLogIndex].term != request.Entries[0].term {
+	if len(rf.Entries) > request.PrevLogIndex+1 || len(rf.Entries) == request.PrevLogIndex && rf.Entries[request.PrevLogIndex].Term != request.Entries[0].Term {
 		return false
 	}
 	return true
@@ -426,7 +435,7 @@ func (rf *Raft) EntryConflict(request *AppendEntriesArgs) bool {
 
 //// PrevLogMatch 检查PrevLogIndex和PrevLogTerm是否匹配
 //func (rf *Raft) PrevLogMatch(request *AppendEntriesArgs, response *AppendEntriesReply) bool {
-//	if len(rf.Entries) <= request.PrevLogIndex || rf.Entries[request.PrevLogIndex].term != request.PrevLogTerm {
+//	if len(rf.Entries) <= request.PrevLogIndex || rf.Entries[request.PrevLogIndex].Term != request.PrevLogTerm {
 //		response.Term, response.Success = rf.currentTerm, false
 //		return false
 //	}
@@ -435,7 +444,7 @@ func (rf *Raft) EntryConflict(request *AppendEntriesArgs) bool {
 //
 //// EntryConflict 检查日志条目是否冲突
 //func (rf *Raft) EntryConflict(request *AppendEntriesArgs, response *AppendEntriesReply) bool {
-//	if len(rf.Entries) > request.PrevLogIndex+1 && rf.Entries[request.PrevLogIndex+1].term != request.Entries[0].term {
+//	if len(rf.Entries) > request.PrevLogIndex+1 && rf.Entries[request.PrevLogIndex+1].Term != request.Entries[0].Term {
 //		rf.Entries = rf.Entries[:request.PrevLogIndex+1]
 //	}
 //	return false
@@ -444,19 +453,19 @@ func (rf *Raft) EntryConflict(request *AppendEntriesArgs) bool {
 // StartElection 在Election timeout之后发起选举
 func (rf *Raft) StartElection() {
 	DPrintf(dTimer, "S%v start election", rf.me)
-	rf.mu.Lock()
+	//rf.mu.Lock()
 	rf.votedFor = rf.me
-	defer rf.mu.Unlock()
+	//defer rf.mu.Unlock()
 	var grantedVotes = 1
 	requestVoteArgs := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: len(rf.Entries) - 1, //LastLogTerm:  rf.Entries[len(rf.Entries)-1].term,
+		LastLogIndex: len(rf.Entries) - 1, //LastLogTerm:  rf.Entries[len(rf.Entries)-1].Term,
 	}
 	if len(rf.Entries) == 0 {
 		requestVoteArgs.LastLogTerm = -1
 	} else {
-		requestVoteArgs.LastLogTerm = rf.Entries[len(rf.Entries)-1].term
+		requestVoteArgs.LastLogTerm = rf.Entries[len(rf.Entries)-1].Term
 	}
 	for peer := range rf.peers {
 		if peer == rf.me {
@@ -470,7 +479,7 @@ func (rf *Raft) StartElection() {
 						grantedVotes += 1
 						if grantedVotes > len(rf.peers)/2 {
 							rf.state = "leader"
-							DPrintf(dLeader, "S%v become leader term %v", rf.me, rf.currentTerm)
+							DPrintf(dInfo, "S%v become leader Term %v", rf.me, rf.currentTerm)
 							return
 							//rf.BroadcastHeartBeat()
 						}
@@ -495,7 +504,7 @@ func (rf *Raft) GetPrevLogTerm() int {
 	if len(rf.Entries) == 0 {
 		return -1
 	}
-	return rf.Entries[len(rf.Entries)-1].term
+	return rf.Entries[len(rf.Entries)-1].Term
 }
 
 // RandomElectionDuration 随机初始化选举超时时间
