@@ -112,7 +112,7 @@ type Raft struct {
 
 func (rf *Raft) BroadcastHeartBeat() {
 	DPrintf(dLog2, "S%v send AppendEntries ", rf.me)
-	//rf.mu.Lock()
+
 	request := &AppendEntriesArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
@@ -124,9 +124,10 @@ func (rf *Raft) BroadcastHeartBeat() {
 		request.PrevLogIndex = -1
 	} else {
 		//request.PrevLogIndex = rf.Entries[len(rf.Entries)-1].Term
+		request.PrevLogTerm = rf.Entries[request.PrevLogTerm].Term
 		request.PrevLogIndex = len(rf.Entries) - 1
 	}
-	//rf.mu.Unlock()
+
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -135,8 +136,18 @@ func (rf *Raft) BroadcastHeartBeat() {
 		DPrintf(dLeader, "S%v send AppendEntries to %v.", rf.me, i)
 		go func(peer int) {
 			for ok := rf.peers[peer].Call("Raft.AppendEntries", request, response); !ok; {
-
+				if rf.state != "leader" {
+					return
+				}
+				ok = rf.peers[peer].Call("Raft.AppendEntries", request, response)
 			}
+			if !response.Success {
+				if response.Term > rf.currentTerm {
+					rf.state = "follower"
+					rf.currentTerm = response.Term
+				}
+			}
+
 		}(i)
 	}
 }
