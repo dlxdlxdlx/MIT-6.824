@@ -74,9 +74,9 @@ const (
 	dWarn    logTopic = "WARN"
 )
 const (
-	heartbeatTimeout   = 70
-	minElectionTimeout = 150
-	maxElectionTimeout = 300
+	heartbeatTimeout   = 100
+	minElectionTimeout = 300
+	maxElectionTimeout = 350
 )
 
 type Role string
@@ -111,8 +111,8 @@ type Raft struct {
 }
 
 func (rf *Raft) BroadcastHeartBeat() {
-	DPrintf(dLog2, "S%v send AppendEntries ", rf.me)
-
+	defer rf.electionTimer.Reset(RandomElectionDuration())
+	rf.mu.Lock()
 	request := &AppendEntriesArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
@@ -127,24 +127,26 @@ func (rf *Raft) BroadcastHeartBeat() {
 		request.PrevLogTerm = rf.Entries[request.PrevLogTerm].Term
 		request.PrevLogIndex = len(rf.Entries) - 1
 	}
-
+	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
 		response := &AppendEntriesReply{}
-		DPrintf(dLeader, "S%v send AppendEntries to %v.", rf.me, i)
 		go func(peer int) {
-			for ok := rf.peers[peer].Call("Raft.AppendEntries", request, response); !ok; {
-				if rf.state != "leader" {
-					return
-				}
-				ok = rf.peers[peer].Call("Raft.AppendEntries", request, response)
+			ok := rf.peers[peer].Call("Raft.AppendEntries", request, response)
+			if !ok {
+				DPrintf(dLeader, "S%v send heartBeat to S%v failed state:%v", rf.me, peer, rf.state)
+			} else {
+				DPrintf(dLeader, "S%v send AppendEntries to %v succeed.", rf.me, peer)
 			}
 			if !response.Success {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 				if response.Term > rf.currentTerm {
 					rf.state = "follower"
 					rf.currentTerm = response.Term
+					return
 				}
 			}
 
@@ -157,7 +159,10 @@ func (rf *Raft) BroadcastHeartBeat() {
 func (rf *Raft) GetState() (int, bool) {
 
 	// Your code here (2A).
-	return rf.currentTerm, rf.state == "leader"
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	currentTerm, state := rf.currentTerm, rf.state == "leader"
+	return currentTerm, state
 }
 
 // save Raft's persistent state to stable storage,
@@ -233,22 +238,22 @@ type RequestVoteReply struct {
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	//DPrintf("{S %v}'s state: {state: %v, Term: %v, commitIndex: %v, lastApplied: %v}", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied)
-	DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}",
-		rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
+	rf.mu.Lock()
+	rf.electionTimer.Reset(RandomElectionDuration())
+	defer rf.mu.Unlock()
+	DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}", rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
 	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
 	}
 	if request.Term == rf.currentTerm && rf.votedFor != -1 {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
+		return
 	}
 	if request.Term > rf.currentTerm {
 		rf.state = "follower"
 		rf.currentTerm, rf.votedFor = request.Term, request.CandidateId
-		DPrintf(dClient, "S%v vote for S%v", rf.me, request.CandidateId)
+		DPrintf(dLog2, "S%v vote for S%v Term: %v", rf.me, request.CandidateId, rf.currentTerm)
 		reply.Term, reply.VotedGranted = rf.currentTerm, true
 		return
 	}
@@ -256,10 +261,9 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
 	}
-	rf.electionTimer.Reset(RandomElectionDuration())
-	DPrintf(dClient, "S%v vote for S%v", rf.me, request.CandidateId)
+	DPrintf(dClient, "S%v vote for S%v Term:%v", rf.me, request.CandidateId, rf.currentTerm)
 	reply.Term, reply.VotedGranted = rf.currentTerm, true
-
+	return
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -310,11 +314,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
 
 	// Your code here (2B).
 
-	return index, term, isLeader
+	return index, term, rf.state == "leader"
 }
 
 // Kill the tester doesn't halt goroutines created by Raft after each test,
@@ -329,6 +332,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	DPrintf(dWarn, "S%v killed", rf.me)
 }
 
 func (rf *Raft) killed() bool {
@@ -345,25 +349,15 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		select {
 		case <-rf.electionTimer.C:
-			//DPrintf("S{%v} electionTimeout", rf.me)
-			DPrintf(dTimer, "S%v electionout", rf.me)
-			rf.mu.Lock()
-			if rf.state != "leader" {
-				rf.state = "candidate"
-				rf.currentTerm += 1
-				rf.StartElection()
-			} else {
-				rf.electionTimer.Reset(RandomElectionDuration())
-			}
-			rf.mu.Unlock()
+			//DPrintf(dTimer, "S%v electionout", rf.me)
+			rf.StartElection()
+			rf.electionTimer.Reset(RandomElectionDuration())
 		case <-rf.heartbeatTimer.C:
-			rf.mu.Lock()
-			if rf.state == "leader" {
-				DPrintf(dLeader, "S%v heartBeatTimeout", rf.me)
+			//DPrintf(dLeader, "S%v heartBeatTimeout", rf.me)
+			_, isLeader := rf.GetState()
+			if isLeader {
 				rf.BroadcastHeartBeat()
 			}
-			rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
-			rf.mu.Unlock()
 		}
 
 	}
@@ -385,10 +379,10 @@ type AppendEntriesReply struct {
 
 // AppendEntries 添加日志条目, 同时也可以作为心跳机制RPC调用
 func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
-	DPrintf(dClient, "S%v recv AppendEntries from S%v", rf.me, request.LeaderId)
-	rf.mu.Lock()
-	defer rf.mu.Lock()
+	rf.electionTimer.Reset(RandomElectionDuration())
 	//1. Reply false if Term < currentTerm (§5.1)
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 	if request.Term < rf.currentTerm {
 		response.Term, response.Success = rf.currentTerm, false
 		return
@@ -398,14 +392,17 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	}
 	if rf.state != "follower" && rf.currentTerm <= request.Term {
 		//选举还没有完成就收到心跳包的话就自动变成follower
+		DPrintf(dClient, "S%v recv RPC from higher term state: %v become follower", rf.me, rf.state)
 		rf.state = "follower"
+		rf.currentTerm = request.Term
+		return
 	}
-	rf.electionTimer.Reset(RandomElectionDuration())
 	// 如果是心跳包的话
 	if len(request.Entries) == 0 && request.Term >= rf.currentTerm {
 		rf.currentTerm = request.Term
 		DPrintf(dClient, "S%v recv heartbeat from S%v", rf.me, request.LeaderId)
 		response.Term, response.Success = rf.currentTerm, true
+		return
 	}
 	//2. Reply false if log doesn’t contain an entry at prevLogIndex
 	//whose Term matches prevLogTerm (§5.3)
@@ -464,9 +461,10 @@ func (rf *Raft) EntryConflict(request *AppendEntriesArgs) bool {
 // StartElection 在Election timeout之后发起选举
 func (rf *Raft) StartElection() {
 	DPrintf(dTimer, "S%v start election", rf.me)
-	//rf.mu.Lock()
+	rf.mu.Lock()
 	rf.votedFor = rf.me
-	//defer rf.mu.Unlock()
+	rf.currentTerm += 1
+	rf.state = "candidate"
 	var grantedVotes = 1
 	requestVoteArgs := &RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -478,6 +476,7 @@ func (rf *Raft) StartElection() {
 	} else {
 		requestVoteArgs.LastLogTerm = rf.Entries[len(rf.Entries)-1].Term
 	}
+	rf.mu.Unlock()
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -485,14 +484,16 @@ func (rf *Raft) StartElection() {
 		go func(peer int) {
 			reply := &RequestVoteReply{}
 			if rf.sendRequestVote(peer, requestVoteArgs, reply) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 				if rf.currentTerm == requestVoteArgs.Term && rf.state == "candidate" {
 					if reply.VotedGranted {
 						grantedVotes += 1
 						if grantedVotes > len(rf.peers)/2 {
 							rf.state = "leader"
 							DPrintf(dInfo, "S%v become leader Term %v", rf.me, rf.currentTerm)
+							rf.BroadcastHeartBeat()
 							return
-							//rf.BroadcastHeartBeat()
 						}
 					}
 				} else if reply.Term > rf.currentTerm {
