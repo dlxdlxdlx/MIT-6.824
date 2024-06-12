@@ -49,8 +49,8 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 type LogEntry struct {
-	Term int
-	Data string
+	Term    int
+	Payload interface{}
 }
 
 type logTopic string
@@ -75,7 +75,7 @@ const (
 )
 const (
 	heartbeatTimeout   = 100
-	minElectionTimeout = 300
+	minElectionTimeout = 200
 	maxElectionTimeout = 350
 )
 
@@ -89,7 +89,7 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your Data here (2A, 2B, 2C).
+	// Your Payload here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	appCh          chan ApplyMsg
@@ -111,7 +111,9 @@ type Raft struct {
 }
 
 func (rf *Raft) BroadcastHeartBeat() {
-	DPrintf(dLog2, "S%v get lock", rf.me)
+	//rf.mu.Lock()
+	DPrintf(dLog2, "S%v broadCast get lock", rf.me)
+
 	rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
 	rf.electionTimer.Reset(RandomElectionDuration())
 	request := &AppendEntriesArgs{
@@ -127,6 +129,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 		request.PrevLogTerm = rf.Entries[request.PrevLogTerm].Term
 		request.PrevLogIndex = len(rf.Entries) - 1
 	}
+	//defer rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -170,8 +173,8 @@ func (rf *Raft) persist() {
 	// e := labgob.NewEncoder(w)
 	// e.Encode(rf.xxx)
 	// e.Encode(rf.yyy)
-	// Data := w.Bytes()
-	// rf.persister.SaveRaftState(Data)
+	// Payload := w.Bytes()
+	// rf.persister.SaveRaftState(Payload)
 }
 
 // restore previously persisted state.
@@ -181,7 +184,7 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(Data)
+	// r := bytes.NewBuffer(Payload)
 	// d := labgob.NewDecoder(r)
 	// var xxx
 	// var yyy
@@ -215,7 +218,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // RequestVoteArgs example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your Data here (2A, 2B).
+	// Your Payload here (2A, 2B).
 	Term         int //candidate's Term
 	CandidateId  int // candidate requesting vote
 	LastLogIndex int
@@ -225,7 +228,7 @@ type RequestVoteArgs struct {
 // RequestVoteReply example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your Data here (2A).
+	// Your Payload here (2A).
 	Term         int
 	VotedGranted bool
 }
@@ -295,6 +298,45 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) appendNewEntry(command interface{}) LogEntry {
+
+	entry := LogEntry{
+		Term:    rf.currentTerm,
+		Payload: command,
+	}
+	rf.Entries = append(rf.Entries, entry)
+	rf.lastApplied++
+	return entry
+}
+func (rf *Raft) replicator(entry LogEntry) {
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	DPrintf(dLeader, "S%v start replicate %v", rf.me, entry.Payload)
+	appendEntryArgs := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: rf.lastApplied - 1,
+		//PrevLogTerm:       rf.Entries[rf.lastApplied].Term,
+		LeaderCommitIndex: rf.commitIndex,
+	}
+	if rf.lastApplied == 0 {
+		appendEntryArgs.PrevLogTerm = -1
+		appendEntryArgs.PrevLogIndex = -1
+	} else {
+		appendEntryArgs.PrevLogIndex = rf.lastApplied
+		appendEntryArgs.PrevLogTerm = rf.Entries[rf.lastApplied-1].Term
+	}
+	for i, peer := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(index int, peer *labrpc.ClientEnd) {
+			appendEntryReply := &AppendEntriesReply{}
+			peer.Call("Raft.AppendEntries", appendEntryArgs, appendEntryReply)
+		}(i, peer)
+	}
+}
+
 // Start the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -310,9 +352,17 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != "leader" {
+		return index, term, false
+	}
 	// Your code here (2B).
-
+	newLog := rf.appendNewEntry(command)
+	DPrintf(dClient, "S%v save log %v", rf.me, command)
+	index = rf.lastApplied
+	term = rf.currentTerm
+	rf.replicator(newLog)
 	return index, term, rf.state == "leader"
 }
 
@@ -349,7 +399,9 @@ func (rf *Raft) ticker() {
 		case <-rf.heartbeatTimer.C:
 			_, isLeader := rf.GetState()
 			if isLeader {
+				rf.mu.Lock()
 				rf.BroadcastHeartBeat()
+				rf.mu.Unlock()
 			}
 		}
 
@@ -373,7 +425,7 @@ type AppendEntriesReply struct {
 // AppendEntries 添加日志条目, 同时也可以作为心跳机制RPC调用
 func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
 	rf.mu.Lock()
-	DPrintf(dLog2, "S%v append_entries get lock", rf.me)
+	//DPrintf(dLog2, "S%v append_entries get lock", rf.me)
 	defer rf.mu.Unlock()
 	rf.electionTimer.Reset(RandomElectionDuration())
 	//1. Reply false if Term < currentTerm (§5.1)
@@ -406,6 +458,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		response.Term, response.Success = rf.currentTerm, false
 		return
 	}
+	DPrintf(dLog, "S%v append entry %v entryLen%v", rf.me, request.Entries[0].Payload, len(rf.Entries))
 	//3. If an existing entry conflicts with a new one (same index but different terms),
 	//   delete the existing entry and all that follow it (§5.3)
 	if rf.EntryConflict(request) {
@@ -456,8 +509,8 @@ func (rf *Raft) EntryConflict(request *AppendEntriesArgs) bool {
 
 // StartElection 在Election timeout之后发起选举
 func (rf *Raft) StartElection() {
-	DPrintf(dTimer, "S%v start election", rf.me)
 	rf.mu.Lock()
+	DPrintf(dTimer, "S%v start election", rf.me)
 	//DPrintf(dLog2, "S%v start_election getLock", rf.me)
 	rf.electionTimer.Reset(RandomElectionDuration())
 	rf.votedFor = rf.me
@@ -467,9 +520,9 @@ func (rf *Raft) StartElection() {
 	requestVoteArgs := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: len(rf.Entries) - 1, //LastLogTerm:  rf.Entries[len(rf.Entries)-1].Term,
+		LastLogIndex: rf.lastApplied, //LastLogTerm:  rf.Entries[len(rf.Entries)-1].Term,
 	}
-	if len(rf.Entries) == 0 {
+	if rf.lastApplied == -1 {
 		requestVoteArgs.LastLogTerm = -1
 	} else {
 		requestVoteArgs.LastLogTerm = rf.Entries[len(rf.Entries)-1].Term

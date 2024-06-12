@@ -1,0 +1,105 @@
+000000 LOG1 S0 start up
+000005 LOG1 S1 start up
+000005 LOG1 S2 start up
+Test (2A): initial election ...
+003120 TIMR S0 start election
+003124 LOG2 S1 request_vote get lock
+003124 LOG2 S2 request_vote get lock
+003124 LOG1 S1 recvd vote request from S0 self-state:{CT:0 VF: -1} candidate-state:{CT:1}
+003124 LOG2 S1 vote for S0 Term: 1
+003124 LOG1 S2 recvd vote request from S0 self-state:{CT:0 VF: -1} candidate-state:{CT:1}
+003124 LOG2 S2 vote for S0 Term: 1
+003129 INFO S0 become leader Term 1
+006232 TIMR S1 start election
+006232 LOG2 S2 request_vote get lock
+006232 LOG1 S2 recvd vote request from S1 self-state:{CT:1 VF: 0} candidate-state:{CT:2}
+006232 LOG2 S2 vote for S1 Term: 2
+006237 INFO S1 become leader Term 2
+006702 TIMR S0 start election
+009633 TIMR S2 start election
+009633 TIMR S1 start election
+012872 TIMR S2 start election
+016426 TIMR S2 start election
+019998 TIMR S2 start election
+023268 TIMR S2 start election
+026513 TIMR S2 start election
+029602 TIMR S2 start election
+033022 TIMR S2 start election
+036584 TIMR S2 start election
+039685 TIMR S2 start election
+043086 TIMR S2 start election
+046352 TIMR S2 start election
+049931 TIMR S2 start election
+053177 TIMR S2 start election
+056421 TIMR S2 start election
+059508 TIMR S2 start election
+062616 TIMR S2 start election
+066026 TIMR S2 start election
+069268 TIMR S2 start election
+072662 TIMR S2 start election
+076210 TIMR S2 start election
+079645 TIMR S2 start election
+083013 TIMR S2 start election
+086425 TIMR S2 start election
+089511 TIMR S2 start election
+092770 TIMR S2 start election
+096164 TIMR S2 start election
+099723 TIMR S2 start election
+103306 TIMR S2 start election
+106862 TIMR S2 start election
+109959 TIMR S2 start election
+113385 TIMR S2 start election
+116807 TIMR S2 start election
+120204 TIMR S2 start election
+123749 TIMR S2 start election
+126848 TIMR S2 start election
+130261 TIMR S2 start election
+133690 TIMR S2 start election
+136935 TIMR S2 start election
+140342 TIMR S2 start election
+143742 TIMR S2 start election
+146835 TIMR S2 start election
+150083 TIMR S2 start election
+153184 TIMR S2 start election
+156438 TIMR S2 start election
+159692 TIMR S2 start election
+163095 TIMR S2 start election
+166206 TIMR S2 start election
+169461 TIMR S2 start election
+172553 TIMR S2 start election
+176134 TIMR S2 start election
+179526 TIMR S2 start election
+182774 TIMR S2 start election
+186039 TIMR S2 start election
+189132 TIMR S2 start election
+192239 TIMR S2 start election
+195485 TIMR S2 start election
+198599 TIMR S2 start election
+202013 TIMR S2 start election
+205431 TIMR S2 start election
+208687 TIMR S2 start election
+212088 TIMR S2 start election
+215352 TIMR S2 start election
+218602 TIMR S2 start election
+221685 TIMR S2 start election
+224939 TIMR S2 start election
+228350 TIMR S2 start election
+231455 TIMR S2 start election
+234543 TIMR S2 start election
+237658 TIMR S2 start election
+240918 TIMR S2 start election
+244478 TIMR S2 start election
+248050 TIMR S2 start election
+251159 TIMR S2 start election
+254575 TIMR S2 start election
+257828 TIMR S2 start election
+261248 TIMR S2 start election
+264826 TIMR S2 start election
+268228 TIMR S2 start election
+271631 TIMR S2 start election
+275031 TIMR S2 start election
+278123 TIMR S2 start election
+281366 TIMR S2 start election
+284927 TIMR S2 start election
+exit status 0xc000013a
+FAIL	6.824/raft	28.850s
