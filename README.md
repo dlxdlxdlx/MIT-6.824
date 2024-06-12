@@ -40,8 +40,5 @@ MIT 6.824 课程的学习资料 代码更新为2021版
 - [Raft Extended(2014)](https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf)
 
 
-
-## 学习小组 Group
-
-mit6.824自学互助 QQ群：258537180(群已满)
-mit6.824自学互助二群 QQ群：682413790(群已满)
+# 记录
+![img](./resource/img.png)

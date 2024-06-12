@@ -111,8 +111,9 @@ type Raft struct {
 }
 
 func (rf *Raft) BroadcastHeartBeat() {
-	defer rf.electionTimer.Reset(RandomElectionDuration())
-	rf.mu.Lock()
+	DPrintf(dLog2, "S%v get lock", rf.me)
+	rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
+	rf.electionTimer.Reset(RandomElectionDuration())
 	request := &AppendEntriesArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
@@ -123,23 +124,17 @@ func (rf *Raft) BroadcastHeartBeat() {
 		request.PrevLogTerm = -1
 		request.PrevLogIndex = -1
 	} else {
-		//request.PrevLogIndex = rf.Entries[len(rf.Entries)-1].Term
 		request.PrevLogTerm = rf.Entries[request.PrevLogTerm].Term
 		request.PrevLogIndex = len(rf.Entries) - 1
 	}
-	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
 		response := &AppendEntriesReply{}
 		go func(peer int) {
-			ok := rf.peers[peer].Call("Raft.AppendEntries", request, response)
-			if !ok {
-				DPrintf(dLeader, "S%v send heartBeat to S%v failed state:%v", rf.me, peer, rf.state)
-			} else {
-				DPrintf(dLeader, "S%v send AppendEntries to %v succeed.", rf.me, peer)
-			}
+			rf.peers[peer].Call("Raft.AppendEntries", request, response)
+
 			if !response.Success {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
@@ -239,6 +234,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	DPrintf(dLog2, "S%v request_vote get lock", rf.me)
 	rf.electionTimer.Reset(RandomElectionDuration())
 	defer rf.mu.Unlock()
 	DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}", rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
@@ -349,11 +345,8 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		select {
 		case <-rf.electionTimer.C:
-			//DPrintf(dTimer, "S%v electionout", rf.me)
 			rf.StartElection()
-			rf.electionTimer.Reset(RandomElectionDuration())
 		case <-rf.heartbeatTimer.C:
-			//DPrintf(dLeader, "S%v heartBeatTimeout", rf.me)
 			_, isLeader := rf.GetState()
 			if isLeader {
 				rf.BroadcastHeartBeat()
@@ -379,6 +372,9 @@ type AppendEntriesReply struct {
 
 // AppendEntries 添加日志条目, 同时也可以作为心跳机制RPC调用
 func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
+	rf.mu.Lock()
+	DPrintf(dLog2, "S%v append_entries get lock", rf.me)
+	defer rf.mu.Unlock()
 	rf.electionTimer.Reset(RandomElectionDuration())
 	//1. Reply false if Term < currentTerm (§5.1)
 	//rf.mu.Lock()
@@ -462,6 +458,8 @@ func (rf *Raft) EntryConflict(request *AppendEntriesArgs) bool {
 func (rf *Raft) StartElection() {
 	DPrintf(dTimer, "S%v start election", rf.me)
 	rf.mu.Lock()
+	//DPrintf(dLog2, "S%v start_election getLock", rf.me)
+	rf.electionTimer.Reset(RandomElectionDuration())
 	rf.votedFor = rf.me
 	rf.currentTerm += 1
 	rf.state = "candidate"
