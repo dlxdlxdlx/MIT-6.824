@@ -371,7 +371,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	DPrintf(dLeader, "S%v save log %v", rf.me, command)
 	index = rf.lastApplied
 	term = rf.currentTerm
-	rf.replicator(newLog)
+	rf.replicator()
 	return index, term, rf.state == "leader"
 }
 
