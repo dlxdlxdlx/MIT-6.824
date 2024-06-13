@@ -317,7 +317,7 @@ func (rf *Raft) replicator() {
 		PrevLogIndex:      rf.lastApplied - 1, //PrevLogTerm:       rf.Entries[rf.lastApplied].Term,
 		LeaderCommitIndex: rf.commitIndex,
 	}
-	appendEntryArgs.Entries = append(rf.Entries, entry)
+	appendEntryArgs.Entries = append(rf.Entries)
 	if rf.lastApplied == 0 {
 		appendEntryArgs.PrevLogTerm = -1
 		appendEntryArgs.PrevLogIndex = -1
@@ -334,6 +334,8 @@ func (rf *Raft) replicator() {
 			// 针对每一个peer 发送AppendEntries RPC
 			// 1.直接能append成功
 			// 2. append失败开始进行shrink操作
+			//appendEntryArgs.Entries =
+			//TODO
 			ok := peer.Call("Raft.AppendEntries", appendEntryArgs, appendEntryReply)
 			for !ok || !appendEntryReply.Success {
 				// 找到能够匹配的最大Index
@@ -341,6 +343,8 @@ func (rf *Raft) replicator() {
 					ok = peer.Call("Raft.AppendEntries", appendEntryArgs, appendEntryReply)
 				}
 			}
+			rf.nextIndex[index] = appendEntryReply.MatchIndex + 1
+			rf.matchIndex[index] = appendEntryReply.MatchIndex
 
 		}(i, peer)
 	}
@@ -367,7 +371,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, false
 	}
 	// Your code here (2B).
-	newLog := rf.appendNewEntry(command)
+	rf.appendNewEntry(command)
 	DPrintf(dLeader, "S%v save log %v", rf.me, command)
 	index = rf.lastApplied
 	term = rf.currentTerm
@@ -469,14 +473,16 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	//	response.Term, response.Success = rf.currentTerm, false
 	//	return
 	//}
-	DPrintf(dLog, "S%v append entry:%v entryLen:%v", rf.me, request.Entries[0].Payload, len(rf.Entries))
+	//DPrintf(dLog, "S%v append entry:%v entryLen:%v", rf.me, request.Entries[0].Payload, len(rf.Entries))
 	//3. If an existing entry conflicts with a new one (same index but different terms),
 	//   delete the existing entry and all that follow it (§5.3)
 	if rf.EntryConflict(request) {
+		DPrintf(dLog2, "S%v conflict occur", rf.me)
 		response.Success = false
 		response.Term = rf.currentTerm
 		response.MatchIndex = rf.lastApplied - 1
 	} else {
+		DPrintf(dLog2, "S%v append entry success", rf.me)
 		response.Term, response.Success = rf.currentTerm, true
 		rf.Entries = append(rf.Entries, request.Entries...)
 		rf.lastApplied += len(request.Entries)
@@ -492,7 +498,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	//min(leaderCommit, index of last new entry)
 	if request.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = min(request.LeaderCommitIndex, len(rf.Entries)-1)
-
 	}
 }
 func (rf *Raft) EntryConflict(request *AppendEntriesArgs) bool {
