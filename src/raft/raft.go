@@ -102,10 +102,9 @@ type Raft struct {
 	replicatorCond []*sync.Cond
 	state          Role
 	peers          []peerState
-
-	currentTerm int
-	votedFor    int
-	Entries     []LogEntry
+	currentTerm    int
+	votedFor       int
+	Entries        []LogEntry
 
 	commitIndex int
 	lastApplied int
@@ -142,7 +141,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 		}
 		response := &AppendEntriesReply{}
 		go func(peer int) {
-			rf.peers[peer].Call("Raft.AppendEntries", request, response)
+			rf.peers[peer].clientEnd.Call("Raft.AppendEntries", request, response)
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			if !response.Success {
@@ -299,7 +298,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	ok := rf.peers[server].clientEnd.Call("Raft.RequestVote", args, reply)
 	return ok
 }
 
