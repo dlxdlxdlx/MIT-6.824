@@ -12,7 +12,7 @@ package raft
 // rf.GetState() (Term, isLeader)
 //   ask a Raft for its current Term, and whether it thinks it is leader
 // ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
+//   each time a new entry is committed to the log, each Raft clientEnd
 //   should send an ApplyMsg to the service (or tester)
 //   in the same server.
 //
@@ -28,8 +28,8 @@ import (
 	"6.824/labrpc"
 )
 
-// as each Raft peer becomes aware that successive log Entries are
-// committed, the peer should send an ApplyMsg to the service (or
+// as each Raft clientEnd becomes aware that successive log Entries are
+// committed, the clientEnd should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
 // committed log entry.
@@ -80,14 +80,19 @@ const (
 )
 
 type Role string
+type peerState struct {
+	clientEnd  *labrpc.ClientEnd
+	nextIndex  int
+	matchIndex int
+}
 
-// Raft A Go object implementing a single Raft peer.
+// Raft A Go object implementing a single Raft clientEnd.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	mu sync.Mutex // Lock to protect shared access to this clientEnd's state
+	//peers     []*labrpc.ClientEnd // RPC end points of all peers
+	persister *Persister // Object to hold this clientEnd's persisted state
+	me        int        // this clientEnd's index into peers[]
+	dead      int32      // set by Kill()
 
 	// Your Payload here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -96,6 +101,7 @@ type Raft struct {
 	applyCond      *sync.Cond
 	replicatorCond []*sync.Cond
 	state          Role
+	peers          []peerState
 
 	currentTerm int
 	votedFor    int
@@ -308,8 +314,6 @@ func (rf *Raft) appendNewEntry(command interface{}) LogEntry {
 	return entry
 }
 func (rf *Raft) replicator() {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
 	DPrintf(dLeader, "S%v start replicate", rf.me)
 	appendEntryArgs := &AppendEntriesArgs{
 		Term:              rf.currentTerm,
@@ -317,15 +321,14 @@ func (rf *Raft) replicator() {
 		PrevLogIndex:      rf.lastApplied - 1, //PrevLogTerm:       rf.Entries[rf.lastApplied].Term,
 		LeaderCommitIndex: rf.commitIndex,
 	}
-	appendEntryArgs.Entries = append(rf.Entries)
+	//appendEntryArgs.Entries = append(rf.Entries)
 	if rf.lastApplied == 0 {
-		appendEntryArgs.PrevLogTerm = -1
 		appendEntryArgs.PrevLogIndex = -1
 	} else {
-		appendEntryArgs.PrevLogIndex = rf.lastApplied
 		appendEntryArgs.PrevLogTerm = rf.Entries[rf.lastApplied-1].Term
 	}
 	for i, peer := range rf.peers {
+		appendEntryArgs.Entries = rf.Entries[rf.nextIndex[i]:]
 		if i == rf.me {
 			continue
 		}
@@ -340,13 +343,18 @@ func (rf *Raft) replicator() {
 			for !ok || !appendEntryReply.Success {
 				// 找到能够匹配的最大Index
 				if !appendEntryReply.Success {
+					DPrintf(dLog, "S%v append entries failed", rf.me)
+					if rf.nextIndex[index] > 0 {
+						rf.nextIndex[index]--
+					}
+					appendEntryArgs.Entries = rf.Entries[rf.nextIndex[index]:]
 					ok = peer.Call("Raft.AppendEntries", appendEntryArgs, appendEntryReply)
 				}
 			}
 			rf.nextIndex[index] = appendEntryReply.MatchIndex + 1
 			rf.matchIndex[index] = appendEntryReply.MatchIndex
 
-		}(i, peer)
+		}(i, peer.clientEnd)
 	}
 }
 
@@ -376,6 +384,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = rf.lastApplied
 	term = rf.currentTerm
 	rf.replicator()
+	rf.updateCommitIndex()
 	return index, term, rf.state == "leader"
 }
 
@@ -399,7 +408,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// The ticker go routine starts a new election if this peer hasn't received
+// The ticker go routine starts a new election if this clientEnd hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
@@ -418,6 +427,22 @@ func (rf *Raft) ticker() {
 			}
 		}
 
+	}
+}
+
+func (rf *Raft) updateCommitIndex() {
+	//DPrintf(dLog, "S%v update commit index", rf.me)
+	for i := len(rf.Entries) - 1; i > rf.commitIndex; i-- {
+		count := 1
+		for j := 0; j < len(rf.peers); j++ {
+			if rf.matchIndex[j] >= i {
+				count++
+			}
+		}
+		if count > len(rf.peers)/2 {
+			rf.commitIndex = i
+			break
+		}
 	}
 }
 
@@ -458,14 +483,14 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		return
 	}
 	// 如果是心跳包的话
-	//DPrintf(dLog2, "S%v peer:{term:%v lastApplied:%v} leader:{term:%v prevLogIndex:%v prevLogTerm:%v} isHeartBeat:%v", rf.me, rf.currentTerm, rf.lastApplied, request.Term, request.PrevLogIndex, request.PrevLogTerm, len(request.Entries) == 0)
+	//DPrintf(dLog2, "S%v clientEnd:{term:%v lastApplied:%v} leader:{term:%v prevLogIndex:%v prevLogTerm:%v} isHeartBeat:%v", rf.me, rf.currentTerm, rf.lastApplied, request.Term, request.PrevLogIndex, request.PrevLogTerm, len(request.Entries) == 0)
 	if len(request.Entries) == 0 && request.Term >= rf.currentTerm {
 		rf.currentTerm = request.Term
 		//DPrintf(dClient, "S%v recv heartbeat from S%v", rf.me, request.LeaderId)
 		response.Term, response.Success = rf.currentTerm, true
 		return
 	}
-	DPrintf(dLog2, "S%v recv append entry from S%v, leader state:{prevLogTerm:%v PrevLogIndex:%v}  peer state:{lastApplied: %v}", rf.me, request.LeaderId, request.PrevLogTerm, request.PrevLogIndex, rf.lastApplied)
+	DPrintf(dLog2, "S%v recv append entry from S%v, leader state:{prevLogTerm:%v PrevLogIndex:%v}  clientEnd state:{lastApplied: %v}", rf.me, request.LeaderId, request.PrevLogTerm, request.PrevLogIndex, rf.lastApplied)
 	// 评估日志冲突以及解决日志冲突
 	//2. Reply false if log doesn’t contain an entry at prevLogIndex
 	//whose Term matches prevLogTerm (§5.3)
@@ -586,26 +611,26 @@ func RandomElectionDuration() time.Duration {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:          peers,
-		persister:      persister,
-		me:             me,
-		dead:           0,
-		currentTerm:    0,
-		votedFor:       -1,
-		Entries:        make([]LogEntry, 1),
-		commitIndex:    -1,
-		state:          "follower",
-		lastApplied:    -1,
-		nextIndex:      make([]int, len(peers)),
-		matchIndex:     make([]int, len(peers)),
+		//peers:          peers,
+		persister:   persister,
+		me:          me,
+		dead:        0,
+		currentTerm: 0,
+		votedFor:    -1,
+		Entries:     make([]LogEntry, 1),
+		commitIndex: -1,
+		state:       "follower",
+		lastApplied: -1,
+		//nextIndex:      make([]int, len(peers)),
+		//matchIndex:     make([]int, len(peers)),
 		heartbeatTimer: time.NewTimer(heartbeatTimeout * time.Millisecond),
 		electionTimer:  time.NewTimer(RandomElectionDuration()),
 	}
-	// Your initialization code here (2A, 2B, 2C).
-	for i := 0; i < len(rf.nextIndex); i++ {
-		rf.nextIndex[i] = 0
-		rf.matchIndex[i] = -1
+	for value := range peers {
+		rf.peers = append(rf.peers, peerState{clientEnd: peers[value], nextIndex: 0, matchIndex: -1})
 	}
+	// Your initialization code here (2A, 2B, 2C).
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
