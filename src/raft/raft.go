@@ -438,6 +438,7 @@ func (rf *Raft) updateCommitIndex() {
 	sort.Ints(commited)
 	rf.commitIndex = commited[len(commited)/2-1]
 	DPrintf(dCommit, "S%v update commit index to %v", rf.me, rf.commitIndex)
+	defer rf.applyCond.Signal()
 }
 
 type AppendEntriesArgs struct {
@@ -487,6 +488,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		return
 	}
 	DPrintf(dLog2, "S%v recv append entry from S%v, leader state:{prevLogTerm:%v PrevLogIndex:%v}  clientEnd state:{lastApplied: %v}", rf.me, request.LeaderId, request.PrevLogTerm, request.PrevLogIndex, rf.lastApplied)
+	defer rf.updateCommitIndex()
 	// 评估日志冲突以及解决日志冲突
 	//2. Reply false if log doesn’t contain an entry at prevLogIndex
 	//whose Term matches prevLogTerm (§5.3)
@@ -505,8 +507,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	} else {
 		response.Term, response.Success = rf.currentTerm, true
 		rf.Entries = append(rf.Entries, request.Entries...)
-		rf.lastApplied += len(request.Entries)
-		response.MatchIndex = rf.lastApplied
+		response.MatchIndex = len(rf.Entries) - 1
 		DPrintf(dLog2, "S%v append entry success peer state:{commitIndex:%v entry len: %v}", rf.me, rf.commitIndex, len(rf.Entries))
 		return
 	}
@@ -645,10 +646,10 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 func (rf *Raft) applier() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		DPrintf(dClient, "S%v start apply msgs to Server", rf.me)
 		for rf.lastApplied >= rf.commitIndex {
 			rf.applyCond.Wait()
 		}
+		DPrintf(dClient, "S%v start apply msgs to Server", rf.me)
 		for index := rf.lastApplied + 1; index <= rf.commitIndex; index++ {
 			rf.appCh <- ApplyMsg{
 				CommandValid: true,
@@ -656,11 +657,9 @@ func (rf *Raft) applier() {
 				CommandIndex: index,
 			}
 		}
-		DPrintf(dCommit, "S%v applies entries %v~%v in term %v", rf.me, rf.lastApplied, commitIndex, rf.currentTerm)
-		//rf.lastApplied = int(math.Max(rf.lastApplied, commitIndex))
-		if rf.lastApplied < rf.commitIndex {
-			rf.lastApplied = rf.commitIndex
-		}
+
+		DPrintf(dCommit, "S%v applies entries %v~%v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
+		rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
 		rf.mu.Unlock()
 	}
 }
