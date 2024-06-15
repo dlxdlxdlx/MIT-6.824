@@ -19,6 +19,8 @@ package raft
 
 import (
 	"math/rand"
+	"sort"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -80,11 +82,6 @@ const (
 )
 
 type Role string
-type peerState struct {
-	clientEnd  *labrpc.ClientEnd
-	nextIndex  int
-	matchIndex int
-}
 
 // Raft A Go object implementing a single Raft clientEnd.
 type Raft struct {
@@ -101,13 +98,12 @@ type Raft struct {
 	applyCond      *sync.Cond
 	replicatorCond []*sync.Cond
 	state          Role
-	//peers          []peerState
-	currentTerm int
-	votedFor    int
-	Entries     []LogEntry
+	currentTerm    int
+	votedFor       int
+	Entries        []LogEntry
 
 	commitIndex int
-	lastApplied int
+	lastApplied int // 针对appCh 提交
 	nextIndex   []int
 	matchIndex  []int
 
@@ -123,8 +119,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 	defer rf.electionTimer.Reset(RandomElectionDuration())
 	request := &AppendEntriesArgs{
 		Term:              rf.currentTerm,
-		LeaderId:          rf.me,
-		Entries:           []LogEntry{},
+		LeaderId:          rf.me, //Entries:           []LogEntry{},
 		LeaderCommitIndex: rf.commitIndex,
 	}
 	if len(rf.Entries) == 0 {
@@ -142,8 +137,8 @@ func (rf *Raft) BroadcastHeartBeat() {
 		response := &AppendEntriesReply{}
 		go func(peer int) {
 			rf.peers[peer].Call("Raft.AppendEntries", request, response)
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
+			//rf.mu.Lock()
+			//defer rf.mu.Unlock()
 			if !response.Success {
 				if response.Term > rf.currentTerm {
 					rf.state = "follower"
@@ -309,9 +304,12 @@ func (rf *Raft) appendNewEntry(command interface{}) LogEntry {
 		Payload: command,
 	}
 	rf.Entries = append(rf.Entries, entry)
+	rf.nextIndex[rf.me] = len(rf.Entries)
 	rf.lastApplied++
 	return entry
 }
+
+// replicator 向follower 发送AppendEntries RPC
 func (rf *Raft) replicator() {
 	DPrintf(dLeader, "S%v start replicate", rf.me)
 	appendEntryArgs := &AppendEntriesArgs{
@@ -338,18 +336,21 @@ func (rf *Raft) replicator() {
 			// 2. append失败开始进行shrink操作
 			//appendEntryArgs.Entries =
 			//TODO
+			DPrintf(dLog2, "S%v send append entry to S%v", rf.me, index)
 			ok := peer.Call("Raft.AppendEntries", appendEntryArgs, appendEntryReply)
 			for !ok || !appendEntryReply.Success {
 				// 找到能够匹配的最大Index
 				if !appendEntryReply.Success {
 					DPrintf(dLog, "S%v append entries failed", rf.me)
-					if rf.nextIndex[index] > 0 {
-						rf.nextIndex[index]--
-					}
-					appendEntryArgs.Entries = rf.Entries[rf.nextIndex[index]:]
-					ok = peer.Call("Raft.AppendEntries", appendEntryArgs, appendEntryReply)
+					//if rf.nextIndex[index] > 0 {
+					//	rf.nextIndex[index]--
+					//}
+					//appendEntryArgs.Entries = rf.Entries[rf.nextIndex[index]:]
+					//ok = peer.Call("Raft.AppendEntries", appendEntryArgs, appendEntryReply)
 				}
 			}
+			// todo
+
 			rf.nextIndex[index] = appendEntryReply.MatchIndex + 1
 			rf.matchIndex[index] = appendEntryReply.MatchIndex
 
@@ -379,9 +380,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	// Your code here (2B).
 	rf.appendNewEntry(command)
-	DPrintf(dLeader, "S%v save log %v", rf.me, command)
 	index = rf.lastApplied
 	term = rf.currentTerm
+	rf.nextIndex[rf.me] = len(rf.Entries)
+	DPrintf(dLeader, "S%v save log at index: %v data: %v", rf.me, index, rf.Entries)
 	rf.replicator()
 	rf.updateCommitIndex()
 	return index, term, rf.state == "leader"
@@ -431,18 +433,11 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) updateCommitIndex() {
 	//DPrintf(dLog, "S%v update commit index", rf.me)
-	for i := len(rf.Entries) - 1; i > rf.commitIndex; i-- {
-		count := 1
-		for j := 0; j < len(rf.peers); j++ {
-			if rf.matchIndex[j] >= i {
-				count++
-			}
-		}
-		if count > len(rf.peers)/2 {
-			rf.commitIndex = i
-			break
-		}
-	}
+	commited := make([]int, len(rf.peers))
+	copy(rf.nextIndex, commited)
+	sort.Ints(commited)
+	rf.commitIndex = commited[len(commited)/2-1]
+	DPrintf(dCommit, "S%v update commit index to %v", rf.me, rf.commitIndex)
 }
 
 type AppendEntriesArgs struct {
@@ -485,8 +480,10 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	//DPrintf(dLog2, "S%v clientEnd:{term:%v lastApplied:%v} leader:{term:%v prevLogIndex:%v prevLogTerm:%v} isHeartBeat:%v", rf.me, rf.currentTerm, rf.lastApplied, request.Term, request.PrevLogIndex, request.PrevLogTerm, len(request.Entries) == 0)
 	if len(request.Entries) == 0 && request.Term >= rf.currentTerm {
 		rf.currentTerm = request.Term
-		//DPrintf(dClient, "S%v recv heartbeat from S%v", rf.me, request.LeaderId)
+		DPrintf(dClient, "S%v recv heartbeat from S%v peer:{commitIndex: %v entry_len: %v data: %v} leader:{commitIndex:%v}", rf.me, request.LeaderId, rf.commitIndex, len(rf.Entries), rf.Entries, request.LeaderCommitIndex)
 		response.Term, response.Success = rf.currentTerm, true
+		rf.commitIndex = min(request.LeaderCommitIndex, len(rf.Entries)-1)
+
 		return
 	}
 	DPrintf(dLog2, "S%v recv append entry from S%v, leader state:{prevLogTerm:%v PrevLogIndex:%v}  clientEnd state:{lastApplied: %v}", rf.me, request.LeaderId, request.PrevLogTerm, request.PrevLogIndex, rf.lastApplied)
@@ -506,11 +503,11 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		response.Term = rf.currentTerm
 		response.MatchIndex = rf.lastApplied - 1
 	} else {
-		DPrintf(dLog2, "S%v append entry success", rf.me)
 		response.Term, response.Success = rf.currentTerm, true
 		rf.Entries = append(rf.Entries, request.Entries...)
 		rf.lastApplied += len(request.Entries)
 		response.MatchIndex = rf.lastApplied
+		DPrintf(dLog2, "S%v append entry success peer state:{commitIndex:%v entry len: %v}", rf.me, rf.commitIndex, len(rf.Entries))
 		return
 	}
 	//4. Append any new entries not already in the log
@@ -616,7 +613,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		dead:           0,
 		currentTerm:    0,
 		votedFor:       -1,
-		Entries:        make([]LogEntry, 1),
+		Entries:        make([]LogEntry, 0),
 		commitIndex:    -1,
 		state:          "follower",
 		lastApplied:    -1,
@@ -627,12 +624,43 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	}
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rf.applyCond = sync.NewCond(&rf.mu)
+	for i := 0; i < len(rf.peers); i++ {
+		rf.matchIndex[i], rf.nextIndex[i] = -1, 0
+		if i != rf.me {
+			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
+		}
+	}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	DPrintf(dLog, "S%v start up", rf.me)
 	go rf.ticker()
+	go rf.applier()
 	return rf
+}
+
+// applier 负责向appCh传输已提交的日志条目,使用lastApplied和commitIndex评估哪些日志需要被提交
+func (rf *Raft) applier() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		DPrintf(dClient, "S%v start apply msgs to Server", rf.me)
+		for rf.lastApplied >= rf.commitIndex {
+			rf.applyCond.Wait()
+		}
+		for index := rf.lastApplied + 1; index <= rf.commitIndex; index++ {
+			rf.appCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.Entries[index],
+				CommandIndex: index,
+			}
+		}
+		DPrintf(dCommit, "S%v applies entries %v~%v in term %v", rf.me, rf.lastApplied, commitIndex, rf.currentTerm)
+		//rf.lastApplied = int(math.Max(rf.lastApplied, commitIndex))
+		if rf.lastApplied < rf.commitIndex {
+			rf.lastApplied = rf.commitIndex
+		}
+		rf.mu.Unlock()
+	}
 }
