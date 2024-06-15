@@ -88,11 +88,11 @@ type peerState struct {
 
 // Raft A Go object implementing a single Raft clientEnd.
 type Raft struct {
-	mu sync.Mutex // Lock to protect shared access to this clientEnd's state
-	//peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister // Object to hold this clientEnd's persisted state
-	me        int        // this clientEnd's index into peers[]
-	dead      int32      // set by Kill()
+	mu        sync.Mutex          // Lock to protect shared access to this clientEnd's state
+	peers     []*labrpc.ClientEnd // RPC end points of all peers
+	persister *Persister          // Object to hold this clientEnd's persisted state
+	me        int                 // this clientEnd's index into peers[]
+	dead      int32               // set by Kill()
 
 	// Your Payload here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -101,10 +101,10 @@ type Raft struct {
 	applyCond      *sync.Cond
 	replicatorCond []*sync.Cond
 	state          Role
-	peers          []peerState
-	currentTerm    int
-	votedFor       int
-	Entries        []LogEntry
+	//peers          []peerState
+	currentTerm int
+	votedFor    int
+	Entries     []LogEntry
 
 	commitIndex int
 	lastApplied int
@@ -141,7 +141,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 		}
 		response := &AppendEntriesReply{}
 		go func(peer int) {
-			rf.peers[peer].clientEnd.Call("Raft.AppendEntries", request, response)
+			rf.peers[peer].Call("Raft.AppendEntries", request, response)
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			if !response.Success {
@@ -298,7 +298,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].clientEnd.Call("Raft.RequestVote", args, reply)
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
 
@@ -353,7 +353,7 @@ func (rf *Raft) replicator() {
 			rf.nextIndex[index] = appendEntryReply.MatchIndex + 1
 			rf.matchIndex[index] = appendEntryReply.MatchIndex
 
-		}(i, peer.clientEnd)
+		}(i, peer)
 	}
 }
 
@@ -610,24 +610,22 @@ func RandomElectionDuration() time.Duration {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		//peers:          peers,
-		persister:   persister,
-		me:          me,
-		dead:        0,
-		currentTerm: 0,
-		votedFor:    -1,
-		Entries:     make([]LogEntry, 1),
-		commitIndex: -1,
-		state:       "follower",
-		lastApplied: -1,
-		//nextIndex:      make([]int, len(peers)),
-		//matchIndex:     make([]int, len(peers)),
+		peers:          peers,
+		persister:      persister,
+		me:             me,
+		dead:           0,
+		currentTerm:    0,
+		votedFor:       -1,
+		Entries:        make([]LogEntry, 1),
+		commitIndex:    -1,
+		state:          "follower",
+		lastApplied:    -1,
+		nextIndex:      make([]int, len(peers)),
+		matchIndex:     make([]int, len(peers)),
 		heartbeatTimer: time.NewTimer(heartbeatTimeout * time.Millisecond),
 		electionTimer:  time.NewTimer(RandomElectionDuration()),
 	}
-	for value := range peers {
-		rf.peers = append(rf.peers, peerState{clientEnd: peers[value], nextIndex: 0, matchIndex: -1})
-	}
+
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
