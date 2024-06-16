@@ -141,6 +141,7 @@ func TestBasicAgree2B(t *testing.T) {
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
+		DPrintf(dTrace, "one epoch done")
 	}
 
 	cfg.end()
