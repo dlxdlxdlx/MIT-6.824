@@ -51,6 +51,7 @@ type ApplyMsg struct {
 }
 type LogEntry struct {
 	Term    int
+	Index   int
 	Payload interface{}
 }
 
@@ -321,12 +322,6 @@ func (rf *Raft) replicator() {
 		LeaderId:          rf.me,
 		LeaderCommitIndex: rf.commitIndex,
 	}
-	//appendEntryArgs.Entries = append(rf.Entries)
-	//if rf.getLastLogIndex() == -1 {
-	//	appendEntryArgs.PrevLogTerm = -1
-	//} else {
-	//	appendEntryArgs.PrevLogTerm = rf.Entries[rf.getLastLogIndex()].Term
-	//}
 	for i, peer := range rf.peers {
 		if i == rf.me {
 			continue
@@ -346,23 +341,32 @@ func (rf *Raft) replicator() {
 			for ok := rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply); !ok || !appendEntryReply.Success; {
 				if ok {
 					if !appendEntryReply.Success {
+						// 发送不成功可能在appendEntries之后leader数据没有及时更新导致,也可能是日志不匹配
+						rf.mu.Lock()
 						rf.nextIndex[index]--
 						appendEntryArgs.PrevLogIndex = rf.nextIndex[index] - 1
-						if appendEntryArgs.PrevLogIndex == -1 {
+						if appendEntryArgs.PrevLogIndex <= -1 {
 							appendEntryArgs.PrevLogTerm = -1
 						} else {
 							appendEntryArgs.PrevLogTerm = rf.Entries[appendEntryArgs.PrevLogIndex].Term
 						}
+						appendEntryArgs.Entries = rf.Entries[max(0, rf.nextIndex[index]):]
+						appendEntryArgs.LeaderCommitIndex = rf.commitIndex
+						rf.mu.Unlock()
 					}
 				}
 				if ok && appendEntryReply.Success {
 					break
 				}
+				ok = rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply)
 
 			}
 			// todo
+			rf.mu.Lock()
 			rf.nextIndex[index]++
 			rf.matchIndex[index] = appendEntryReply.MatchIndex
+			rf.updateCommitIndex()
+			rf.mu.Unlock()
 
 		}(i, peer)
 	}
@@ -394,7 +398,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.nextIndex[rf.me] = len(rf.Entries)
 	DPrintf(dLeader, "S%v save log at index: %v data: %v", rf.me, index, rf.Entries)
 	rf.replicator()
-	rf.updateCommitIndex()
+	DPrintf(dLeader, "S%v nextIndex: %v", rf.me, rf.nextIndex)
+	rf.BroadcastHeartBeat()
 	return index, term, rf.state == Leader
 }
 
@@ -442,11 +447,19 @@ func (rf *Raft) ticker() {
 
 func (rf *Raft) updateCommitIndex() {
 	//DPrintf(dLog, "S%v update commit index", rf.me)
+
 	commited := make([]int, len(rf.peers))
 	copy(rf.nextIndex, commited)
+	DPrintf(dLog, "S%v array to sort %v : nextIndex:%v", rf.me, commited, rf.nextIndex)
 	sort.Ints(commited)
 	rf.commitIndex = commited[len(commited)/2-1]
 	DPrintf(dCommit, "S%v update commit index to %v", rf.me, rf.commitIndex)
+	//commited := make([]int, len(rf.peers))
+	//copy(rf.nextIndex, commited)
+	//DPrintf(dLog, "S%v array to sort %v : nextIndex:%v", rf.me, commited, rf.nextIndex)
+	//sort.Ints(commited)
+	//rf.commitIndex = commited[len(commited)/2-1]
+	//DPrintf(dCommit, "S%v update commit index to %v", rf.me, rf.commitIndex)
 	defer rf.applyCond.Signal()
 }
 
@@ -486,6 +499,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		rf.currentTerm = request.Term
 		return
 	}
+	defer rf.applyCond.Signal()
 	// 如果是心跳包的话
 	//DPrintf(dLog2, "S%v clientEnd:{term:%v lastApplied:%v} leader:{term:%v prevLogIndex:%v prevLogTerm:%v} isHeartBeat:%v", rf.me, rf.currentTerm, rf.lastApplied, request.Term, request.PrevLogIndex, request.PrevLogTerm, len(request.Entries) == 0)
 	if len(request.Entries) == 0 && request.Term >= rf.currentTerm {
@@ -493,11 +507,9 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		DPrintf(dClient, "S%v recv heartbeat from S%v peer:{commitIndex: %v entry_len: %v data: %v} leader:{commitIndex:%v}", rf.me, request.LeaderId, rf.commitIndex, len(rf.Entries), rf.Entries, request.LeaderCommitIndex)
 		response.Term, response.Success = rf.currentTerm, true
 		rf.commitIndex = min(request.LeaderCommitIndex, len(rf.Entries)-1)
-
 		return
 	}
 	DPrintf(dLog2, "S%v recv append entry from S%v, leader state:{prevLogTerm:%v PrevLogIndex:%v}  clientEnd state:{lastApplied: %v}", rf.me, request.LeaderId, request.PrevLogTerm, request.PrevLogIndex, rf.lastApplied)
-	defer rf.updateCommitIndex()
 	// 评估日志冲突以及解决日志冲突
 	//2. Reply false if log doesn’t contain an entry at prevLogIndex
 	//whose Term matches prevLogTerm (§5.3)
@@ -517,18 +529,11 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		response.Term, response.Success = rf.currentTerm, true
 		rf.Entries = append(rf.Entries, request.Entries...)
 		response.MatchIndex = len(rf.Entries) - 1
-		DPrintf(dLog2, "S%v append entry success peer state:{commitIndex:%v entry len: %v}", rf.me, rf.commitIndex, len(rf.Entries))
+		DPrintf(dLog2, "S%v append entry success peer state:{commitIndex:%v entry len: %v commitIndex:%v} leader:{commitId: %v}", rf.me, rf.commitIndex, len(rf.Entries), rf.commitIndex, request.LeaderCommitIndex)
+		if request.LeaderCommitIndex > rf.commitIndex {
+			rf.commitIndex = min(request.LeaderCommitIndex, len(rf.Entries)-1)
+		}
 		return
-	}
-	//4. Append any new entries not already in the log
-	if rf.currentTerm == request.Term && request.PrevLogIndex == rf.GetPrevLogIndex() && request.PrevLogTerm == rf.GetPrevLogTerm() {
-		rf.Entries = append(rf.Entries, request.Entries...)
-		response.MatchIndex = len(rf.Entries) - 1
-	}
-	//5. If leaderCommit > commitIndex, set commitIndex
-	//min(leaderCommit, index of last new entry)
-	if request.LeaderCommitIndex > rf.commitIndex {
-		rf.commitIndex = min(request.LeaderCommitIndex, len(rf.Entries)-1)
 	}
 }
 func (rf *Raft) EntryConflict(request *AppendEntriesArgs) bool {
