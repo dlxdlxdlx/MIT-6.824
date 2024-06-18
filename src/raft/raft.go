@@ -167,25 +167,39 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
 	}
-	if request.Term == rf.currentTerm && rf.votedFor != -1 {
-		reply.Term, reply.VotedGranted = rf.currentTerm, false
-		return
-	}
 	if request.Term > rf.currentTerm {
 		rf.changeState(Follower)
-		rf.currentTerm, rf.votedFor = request.Term, request.CandidateId
-		DPrintf(dLog2, "S%v vote for S%v Term: %v", rf.me, request.CandidateId, rf.currentTerm)
-		reply.Term, reply.VotedGranted = rf.currentTerm, true
-		return
+		rf.currentTerm, rf.votedFor = request.Term, -1
 	}
-	//TODO: 待优化
-	if rf.Entries[len(rf.Entries)-1].Term > request.LastLogTerm || (rf.Entries[len(rf.Entries)-1].Term == request.LastLogTerm && len(rf.Entries) > request.LastLogIndex) {
+	if !rf.LogUpToDate(request.LastLogTerm, request.LastLogIndex) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
 	}
-	DPrintf(dClient, "S%v vote for S%v Term:%v", rf.me, request.CandidateId, rf.currentTerm)
+
+	rf.votedFor = request.CandidateId
 	reply.Term, reply.VotedGranted = rf.currentTerm, true
-	return
+	//if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
+	//	reply.Term, reply.VotedGranted = rf.currentTerm, false
+	//	return
+	//}
+	//if request.Term == rf.currentTerm && rf.votedFor != -1 {
+	//	reply.Term, reply.VotedGranted = rf.currentTerm, false
+	//	return
+	//}
+	//if request.Term > rf.currentTerm {
+	//	rf.changeState(Follower)
+	//	rf.currentTerm, rf.votedFor = request.Term, request.CandidateId
+	//	DPrintf(dLog2, "S%v vote for S%v Term: %v", rf.me, request.CandidateId, rf.currentTerm)
+	//	reply.Term, reply.VotedGranted = rf.currentTerm, true
+	//	return
+	//}
+	////TODO: 待优化
+	//if rf.Entries[len(rf.Entries)-1].Term > request.LastLogTerm || (rf.Entries[len(rf.Entries)-1].Term == request.LastLogTerm && len(rf.Entries) > request.LastLogIndex) {
+	//	reply.Term, reply.VotedGranted = rf.currentTerm, false
+	//	return
+	//}
+	//DPrintf(dClient, "S%v vote for S%v Term:%v", rf.me, request.CandidateId, rf.currentTerm)
+	//reply.Term, reply.VotedGranted = rf.currentTerm, true
 }
 
 // replicator 向follower 发送AppendEntries RPC
@@ -317,9 +331,9 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			}
 			response.ConflictIdx = idx
 		}
+		return
 	}
 
-	DPrintf(dLog2, "S%v recv append entry from S%v, leader state:{prevLogTerm:%v PrevLogIndex:%v requestEntry: %v}  clientEnd state:{lastApplied: %v}", rf.me, request.LeaderId, request.PrevLogTerm, request.PrevLogIndex, request.Entries, rf.lastApplied)
 	// 评估日志冲突以及解决日志冲突
 	//2. Reply false if log doesn’t contain an entry at prevLogIndex
 	//whose Term matches prevLogTerm (§5.3)
@@ -466,6 +480,7 @@ func (rf *Raft) applier() {
 				CommandIndex: entry.Index,
 				CommandTerm:  entry.Term,
 			}
+			DPrintf(dLeader, "S%v apply %v succeed", rf.me, entry.Index)
 		}
 		rf.mu.Lock()
 		DPrintf(dCommit, "S%v applies entries %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
@@ -495,7 +510,7 @@ func (rf *Raft) appendNewEntry(command interface{}) LogEntry {
 	}
 	rf.Entries = append(rf.Entries, newLog)
 	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = newLog.Index, newLog.Index+1
-	DPrintf(dLeader, "S%v appendNewEntry end. matchIndex state:%v nextIndex state:%v", rf.me, rf.matchIndex, rf.nextIndex)
+	//DPrintf(dLeader, "S%v appendNewEntry end. matchIndex state:%v nextIndex state:%v", rf.me, rf.matchIndex, rf.nextIndex)
 
 	return newLog
 
@@ -515,7 +530,7 @@ func (rf *Raft) changeState(role Role) {
 		lastLog := rf.getLastLog()
 		for i := 0; i < len(rf.peers); i++ {
 			rf.matchIndex[i], rf.nextIndex[i] = 0, lastLog.Index+1
-			DPrintf(dLog, "S%v change role nextIndex:%v matchIndex:%v", rf.me, rf.nextIndex, rf.matchIndex)
+			//DPrintf(dLog, "S%v change role nextIndex:%v matchIndex:%v", rf.me, rf.nextIndex, rf.matchIndex)
 		}
 		rf.electionTimer.Stop()
 		rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
@@ -585,7 +600,7 @@ func (rf *Raft) updateCommitIdxForLeader() {
 			rf.applyCond.Signal()
 		}
 	} else {
-		DPrintf(dLeader, "S%v update commit:%v failed", rf.me, newCommitIdx)
+		DPrintf(dLeader, "S%v update failed  newCommitIdx:%v oldCommitIdx:%v", rf.me, newCommitIdx, rf.commitIndex)
 	}
 }
 func (rf *Raft) updateCommitIdxForFollower(commitIdx int) {
@@ -606,4 +621,9 @@ func (rf *Raft) shrinkEntries(entries []LogEntry) {
 		return
 	}
 	rf.Entries = entries
+}
+
+func (rf *Raft) LogUpToDate(logTerm, logIndex int) bool {
+	lastLog := rf.getLastLog()
+	return logTerm > lastLog.Term || (logTerm == lastLog.Term && logIndex >= lastLog.Index)
 }
