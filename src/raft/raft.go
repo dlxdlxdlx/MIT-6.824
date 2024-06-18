@@ -65,7 +65,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 		if i == rf.me {
 			continue
 		}
-		DPrintf(dTrace, "S%v line 68 state:{nextIndex: %v}", rf.me, rf.nextIndex)
+		//DPrintf(dTrace, "S%v HeartBeat start -> state:{nextIndex: %v}", rf.me, rf.nextIndex)
 		prevEntry := rf.Entries[rf.nextIndex[i]-1]
 		request := &AppendEntriesArgs{
 			Term:            rf.currentTerm,
@@ -204,33 +204,6 @@ func (rf *Raft) replicator() {
 				rf.handleAppendEntriesResponse(index, appendEntryArgs, appendEntryReply)
 				rf.mu.Unlock()
 			}
-			//for ok := rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply); !ok || !appendEntryReply.Success; {
-			//	rf.mu.Lock()
-			//	if ok {
-			//		if !appendEntryReply.Success {
-			//			rf.nextIndex[index]--
-			//			appendEntryArgs.PrevLogIndex = rf.nextIndex[index] - 1
-			//			if appendEntryArgs.PrevLogIndex <= -1 {
-			//				appendEntryArgs.PrevLogTerm = -1
-			//			} else {
-			//				appendEntryArgs.PrevLogTerm = rf.Entries[appendEntryArgs.PrevLogIndex].Term
-			//			}
-			//			appendEntryArgs.Entries = rf.Entries[max(0, rf.nextIndex[index]):]
-			//			appendEntryArgs.LeaderCommitIdx = rf.commitIndex
-			//		}
-			//	}
-			//	if ok && appendEntryReply.Success {
-			//		// rf.matchIndex[index] = appendEntryReply.MatchIdx
-			//		//todo: 处理AppendEntries RPC 响应
-			//		break
-			//	}
-			//	rf.mu.Unlock()
-			//	ok = rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply)
-			//
-			//}
-			//DPrintf(dLeader, "S%v recved resp from S%v resp:{%v}", rf.me, index, appendEntryReply)
-			//rf.updateCommitIndex()
-			// todo
 		}(i, peer)
 	}
 }
@@ -366,22 +339,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	}
 	rf.updateCommitIdxForFollower(request.LeaderCommitIdx)
 	response.Term, response.Success = rf.currentTerm, true
-	//defer rf.applyCond.Signal()
-	//if request.PrevLogIndex == -1 {
-	//	rf.Entries = make([]LogEntry, len(request.Entries))
-	//	copy(rf.Entries, request.Entries)
-	//	response.Term, response.Success = rf.currentTerm, true
-	//	DPrintf(dLog, "S%v line 526 appendLog success peer state:{%v}", rf.me, rf.Entries)
-	//	return
-	//} else if request.PrevLogIndex >= 0 && request.PrevLogIndex <= rf.getLastLog().Index && rf.Entries[rf.GetPrevLogIndex()].Term == request.PrevLogTerm {
-	//	// 先缩减数组再拼接
-	//	response.Term, response.Success = rf.currentTerm, true
-	//	rf.Entries = append(rf.Entries[:request.PrevLogIndex+1], request.Entries...)
-	//	return
-	//} else {
-	//	response.Term, response.Success = rf.currentTerm, false
-	//	return
-	//}
 }
 
 // StartElection 在Election timeout之后发起选举
@@ -538,7 +495,7 @@ func (rf *Raft) appendNewEntry(command interface{}) LogEntry {
 	}
 	rf.Entries = append(rf.Entries, newLog)
 	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = newLog.Index, newLog.Index+1
-	DPrintf(dLog2, "S%v matchIndex state:%v nextIndex state:%v", rf.me, rf.matchIndex, rf.nextIndex)
+	DPrintf(dLeader, "S%v appendNewEntry end. matchIndex state:%v nextIndex state:%v", rf.me, rf.matchIndex, rf.nextIndex)
 
 	return newLog
 
@@ -566,13 +523,14 @@ func (rf *Raft) changeState(role Role) {
 	default:
 		panic("unhandled default case")
 	}
-
 }
 
 // createAppendEntriesRequest 创建AppendEntries请求
 func (rf *Raft) createAppendEntriesRequest(prevLogIndex int) *AppendEntriesArgs {
-	entries := make([]LogEntry, len(rf.Entries[prevLogIndex:]))
-	copy(entries, rf.Entries[prevLogIndex:])
+	firstIdx := rf.getFirstLog().Index
+	//slice数组是左开右闭
+	entries := make([]LogEntry, len(rf.Entries[prevLogIndex+1-firstIdx:]))
+	copy(entries, rf.Entries[prevLogIndex+1-firstIdx:])
 	return &AppendEntriesArgs{
 		Term:            rf.currentTerm,
 		LeaderId:        rf.me,
@@ -588,9 +546,10 @@ func (rf *Raft) handleAppendEntriesResponse(peer int, request *AppendEntriesArgs
 		return
 	}
 	if response.Success {
+		DPrintf(dLeader, "S%v before  S%v nextIndex State:%v matchIndex state:%v", rf.me, peer, rf.nextIndex, rf.matchIndex)
 		rf.matchIndex[peer] = request.PrevLogIndex + len(request.Entries)
-		DPrintf(dLeader, "S%v S%v nextIndex changed %v->%v", rf.me, peer, rf.nextIndex[peer], rf.nextIndex[peer]+1)
 		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+		DPrintf(dLeader, "S%v S%v append succeed nextIndex State:%v matchIndex state:%v", rf.me, peer, rf.nextIndex, rf.matchIndex)
 		rf.updateCommitIdxForLeader()
 	} else {
 		if response.Term > rf.currentTerm {
