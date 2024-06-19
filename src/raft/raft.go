@@ -62,27 +62,22 @@ func (rf *Raft) BroadcastHeartBeat() {
 	if rf.state != Leader {
 		return
 	}
-
 	defer rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
 		//DPrintf(dTrace, "S%v HeartBeat start -> S%v", rf.me, i)
-		request := rf.createAppendEntriesRequest(rf.nextIndex[i]-1, true)
 		go func(peer int) {
+			rf.mu.Lock()
+			request := rf.createAppendEntriesRequest(rf.nextIndex[peer] - 1)
+			rf.mu.Unlock()
 			response := &AppendEntriesReply{}
 			if rf.sendAppendEntries(peer, request, response) {
-				DPrintf(dTrace, "S%v recv heartbeatResp from S%v resp:%v", rf.me, peer, response)
 				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				if !response.Success {
-					if response.Term > rf.currentTerm {
-						rf.changeState(Follower)
-						rf.currentTerm = response.Term
-						return
-					}
-				}
+				DPrintf(dTrace, "S%v recv heartbeatResp from S%v resp:%v", rf.me, peer, response)
+				rf.handleAppendEntriesResponse(peer, request, response)
+				rf.mu.Unlock()
 			}
 
 		}(i)
@@ -186,13 +181,15 @@ func (rf *Raft) replicator() {
 		}
 		go func(index int, peer *labrpc.ClientEnd) {
 			rf.mu.Lock()
-			appendEntryArgs := rf.createAppendEntriesRequest(rf.nextIndex[index]-1, false)
+			appendEntryArgs := rf.createAppendEntriesRequest(rf.nextIndex[index] - 1)
+			rf.mu.Unlock()
 			appendEntryReply := &AppendEntriesReply{}
 			DPrintf(dLog2, "S%v send append entry to S%v entries:%v", rf.me, index, appendEntryArgs.Entries)
 			if rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply) {
+				rf.mu.Lock()
 				rf.handleAppendEntriesResponse(index, appendEntryArgs, appendEntryReply)
+				rf.mu.Unlock()
 			}
-			rf.mu.Unlock()
 		}(i, peer)
 	}
 }
@@ -506,18 +503,9 @@ func (rf *Raft) changeState(role Role) {
 }
 
 // createAppendEntriesRequest 创建AppendEntries请求
-func (rf *Raft) createAppendEntriesRequest(prevLogIndex int, isHeartBeat bool) *AppendEntriesArgs {
+func (rf *Raft) createAppendEntriesRequest(prevLogIndex int) *AppendEntriesArgs {
 	firstIdx := rf.getFirstLog().Index
 	//slice数组是左开右闭
-	if isHeartBeat {
-		return &AppendEntriesArgs{
-			Term:            rf.currentTerm,
-			LeaderId:        rf.me,
-			PrevLogIndex:    prevLogIndex,
-			PrevLogTerm:     rf.Entries[prevLogIndex].Term, //Entries:         entries,
-			LeaderCommitIdx: rf.commitIndex,
-		}
-	}
 	entries := make([]LogEntry, len(rf.Entries[prevLogIndex+1-firstIdx:]))
 	copy(entries, rf.Entries[prevLogIndex+1-firstIdx:])
 	return &AppendEntriesArgs{
@@ -550,7 +538,6 @@ func (rf *Raft) handleAppendEntriesResponse(peer int, request *AppendEntriesArgs
 				for i := request.PrevLogIndex; i >= firstIndex; i-- {
 					if rf.Entries[i-firstIndex].Term == response.ConflictTerm {
 						rf.nextIndex[peer] = i + 1
-						DPrintf(dLeader, "S%v line 633 nextIndex:%v", rf.me, rf.nextIndex)
 						break
 					}
 				}
