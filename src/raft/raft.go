@@ -75,7 +75,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 			response := &AppendEntriesReply{}
 			if rf.sendAppendEntries(peer, request, response) {
 				rf.mu.Lock()
-				DPrintf(dTrace, "S%v recv heartbeatResp from S%v resp:%v", rf.me, peer, response)
+				//DPrintf(dTrace, "S%v recv heartbeatResp from S%v resp:%v", rf.me, peer, response)
 				rf.handleAppendEntriesResponse(peer, request, response)
 				rf.mu.Unlock()
 			}
@@ -184,9 +184,10 @@ func (rf *Raft) replicator() {
 			appendEntryArgs := rf.createAppendEntriesRequest(rf.nextIndex[index] - 1)
 			rf.mu.Unlock()
 			appendEntryReply := &AppendEntriesReply{}
-			DPrintf(dLog2, "S%v send append entry to S%v entries:%v", rf.me, index, appendEntryArgs.Entries)
+			//DPrintf(dLog2, "S%v send append entry to S%v entries:%v", rf.me, index, appendEntryArgs.Entries)
 			if rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply) {
 				rf.mu.Lock()
+
 				rf.handleAppendEntriesResponse(index, appendEntryArgs, appendEntryReply)
 				rf.mu.Unlock()
 			}
@@ -216,7 +217,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	// Your code here (2B).
 	entry := rf.appendNewEntry(command)
-	DPrintf(dLeader, "S%v save log at index: %v data: %v", rf.me, entry.Index, rf.Entries)
+	//DPrintf(dLeader, "S%v save log at index: %v data: %v", rf.me, entry.Index, rf.Entries)
 	rf.replicator()
 	return entry.Index, entry.Term, rf.state == Leader
 }
@@ -434,7 +435,7 @@ func (rf *Raft) applier() {
 		firstIdx, commitIdx, lastApplied := rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied
 		entries := make([]LogEntry, commitIdx-lastApplied)
 		copy(entries, rf.Entries[lastApplied+1-firstIdx:commitIdx+1-firstIdx])
-		DPrintf(dClient, "S%v start apply msgs to Server state:{firstIdx:%v commitIdx:%v lastApplied:%v nextIndex:%v matchIndex:%v} entries to apply:%v", rf.me, rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied, rf.nextIndex, rf.matchIndex, entries)
+		//DPrintf(dClient, "S%v start apply msgs to Server state:{firstIdx:%v commitIdx:%v lastApplied:%v nextIndex:%v matchIndex:%v} entries to apply:%v", rf.me, rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied, rf.nextIndex, rf.matchIndex, entries)
 		rf.mu.Unlock()
 		for _, entry := range entries {
 			rf.appCh <- ApplyMsg{
@@ -443,7 +444,7 @@ func (rf *Raft) applier() {
 				CommandIndex: entry.Index,
 				CommandTerm:  entry.Term,
 			}
-			DPrintf(dLeader, "S%v apply %v succeed", rf.me, entry.Index)
+			DPrintf(dCommit, "S%v apply %v succeed", rf.me, entry.Index)
 		}
 		rf.mu.Lock()
 		DPrintf(dCommit, "S%v applies entries %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
@@ -522,10 +523,11 @@ func (rf *Raft) handleAppendEntriesResponse(peer int, request *AppendEntriesArgs
 	if rf.state != Leader || rf.currentTerm != request.Term {
 		return
 	}
+	//DPrintf(dLeader, "S%v recv appendEntriesResp from S%v resp:%v", rf.me, peer, response)
 	if response.Success {
 		rf.matchIndex[peer] = request.PrevLogIndex + len(request.Entries)
 		rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-		DPrintf(dLeader, "S%v S%v append succeed nextIndex State:%v matchIndex state:%v", rf.me, peer, rf.nextIndex, rf.matchIndex)
+		//DPrintf(dLeader, "S%v S%v append succeed nextIndex State:%v matchIndex state:%v", rf.me, peer, rf.nextIndex, rf.matchIndex)
 		rf.updateCommitIdxForLeader()
 	} else {
 		if response.Term > rf.currentTerm {
@@ -553,21 +555,19 @@ func (rf *Raft) updateCommitIdxForLeader() {
 	copy(dist, rf.matchIndex)
 	sort.Ints(dist)
 	newCommitIdx := dist[n-(n/2+1)]
-	DPrintf(dInfo, "S%v entry state:%v", rf.me, rf.Entries)
+	//DPrintf(dInfo, "S%v entry state:%v", rf.me, rf.Entries)
 	if newCommitIdx > rf.commitIndex {
 		if rf.matchLog(rf.currentTerm, newCommitIdx) {
 			rf.commitIndex = newCommitIdx
 			DPrintf(dLeader, "S%v trying to update commit:%v", rf.me, newCommitIdx)
 			rf.applyCond.Signal()
 		}
-	} else {
-		DPrintf(dLeader, "S%v update failed  newCommitIdx:%v oldCommitIdx:%v", rf.me, newCommitIdx, rf.commitIndex)
 	}
 }
 func (rf *Raft) updateCommitIdxForFollower(commitIdx int) {
 	newCommitIdx := min(commitIdx, rf.getLastLog().Index)
 	if newCommitIdx > rf.commitIndex {
-		DPrintf(dLog2, "S%v update commit from %v -> %v in term %v", rf.me, rf.commitIndex, newCommitIdx, rf.currentTerm)
+		//DPrintf(dLog2, "S%v update commit from %v -> %v in term %v", rf.me, rf.commitIndex, newCommitIdx, rf.currentTerm)
 		rf.commitIndex = newCommitIdx
 		rf.applyCond.Signal()
 	}
