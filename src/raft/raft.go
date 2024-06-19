@@ -59,25 +59,23 @@ type Raft struct {
 }
 
 func (rf *Raft) BroadcastHeartBeat() {
+	if rf.state != Leader {
+		return
+	}
 
 	defer rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
-		//DPrintf(dTrace, "S%v HeartBeat start -> state:{nextIndex: %v}", rf.me, rf.nextIndex)
-		prevEntry := rf.Entries[rf.nextIndex[i]-1]
-		request := &AppendEntriesArgs{
-			Term:            rf.currentTerm,
-			LeaderId:        rf.me,
-			Entries:         []LogEntry{},
-			LeaderCommitIdx: rf.commitIndex,
-			PrevLogIndex:    prevEntry.Index,
-			PrevLogTerm:     prevEntry.Term,
-		}
-		response := &AppendEntriesReply{}
+		//DPrintf(dTrace, "S%v HeartBeat start -> S%v", rf.me, i)
+		request := rf.createAppendEntriesRequest(rf.nextIndex[i]-1, true)
 		go func(peer int) {
+			response := &AppendEntriesReply{}
 			if rf.sendAppendEntries(peer, request, response) {
+				DPrintf(dTrace, "S%v recv heartbeatResp from S%v resp:%v", rf.me, peer, response)
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 				if !response.Success {
 					if response.Term > rf.currentTerm {
 						rf.changeState(Follower)
@@ -159,7 +157,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	rf.electionTimer.Reset(RandomElectionDuration())
+	defer rf.electionTimer.Reset(RandomElectionDuration())
 	defer rf.mu.Unlock()
 	DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}", rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
 	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
@@ -188,7 +186,7 @@ func (rf *Raft) replicator() {
 		}
 		go func(index int, peer *labrpc.ClientEnd) {
 			rf.mu.Lock()
-			appendEntryArgs := rf.createAppendEntriesRequest(rf.nextIndex[index] - 1)
+			appendEntryArgs := rf.createAppendEntriesRequest(rf.nextIndex[index]-1, false)
 			appendEntryReply := &AppendEntriesReply{}
 			DPrintf(dLog2, "S%v send append entry to S%v entries:%v", rf.me, index, appendEntryArgs.Entries)
 			if rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply) {
@@ -271,7 +269,6 @@ func (rf *Raft) ticker() {
 func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.electionTimer.Reset(RandomElectionDuration())
 
 	if request.Term < rf.currentTerm {
 		response.Term, response.Success = rf.currentTerm, false
@@ -280,17 +277,12 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 	if request.Term > rf.currentTerm {
 		rf.currentTerm, rf.votedFor = request.Term, -1
 	}
-	if rf.state != Follower && rf.currentTerm <= request.Term {
-		//选举还没有完成就收到心跳包的话就自动变成follower
-		DPrintf(dClient, "S%v recv RPC from higher term state: %v become follower", rf.me, rf.state)
-		rf.state = Follower
-		rf.currentTerm = request.Term
-		rf.votedFor = -1
-		return
-	}
+	rf.changeState(Follower)
+	defer rf.electionTimer.Reset(RandomElectionDuration())
 	if request.PrevLogIndex < rf.getFirstLog().Index {
 		response.Term, response.Success = 0, false
 		DPrintf(dLog, "S%v recv unknown RPC from %v", rf.me, request.LeaderId)
+		return
 	}
 	//defer rf.applyCond.Signal()
 	if !rf.matchLog(request.PrevLogTerm, request.PrevLogIndex) {
@@ -335,11 +327,11 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 // StartElection 在Election timeout之后发起选举
 func (rf *Raft) StartElection() {
 	rf.mu.Lock()
-	DPrintf(dTimer, "S%v start election", rf.me)
-	rf.electionTimer.Reset(RandomElectionDuration())
+	defer rf.electionTimer.Reset(RandomElectionDuration())
 	rf.votedFor = rf.me
-	rf.currentTerm += 1
 	rf.changeState(Candidate)
+	rf.currentTerm += 1
+	DPrintf(dTimer, "S%v start election Term:%v", rf.me, rf.currentTerm)
 	var grantedVotes = 1
 	requestVoteArgs := &RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -354,15 +346,17 @@ func (rf *Raft) StartElection() {
 		}
 		go func(peer int) {
 			reply := &RequestVoteReply{}
+			DPrintf(dInfo, "S%v send RequestVote -> S%v", rf.me, peer)
 			if rf.sendRequestVote(peer, requestVoteArgs, reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
+				DPrintf(dInfo, "S%v recv requestVoteResponse %v from %v", rf.me, reply, peer)
 				if rf.currentTerm == requestVoteArgs.Term && rf.state == Candidate {
 					if reply.VotedGranted {
 						grantedVotes += 1
 						if grantedVotes > len(rf.peers)/2 {
 							rf.changeState(Leader)
-							DPrintf(dInfo, "S%v become leader Term %v", rf.me, rf.currentTerm)
+							DPrintf(dInfo, "S%v become leader Term %v, Entries state:{%v}", rf.me, rf.currentTerm, rf.Entries)
 							rf.BroadcastHeartBeat()
 							return
 						}
@@ -502,7 +496,6 @@ func (rf *Raft) changeState(role Role) {
 		lastLog := rf.getLastLog()
 		for i := 0; i < len(rf.peers); i++ {
 			rf.matchIndex[i], rf.nextIndex[i] = 0, lastLog.Index+1
-			//DPrintf(dLog, "S%v change role nextIndex:%v matchIndex:%v", rf.me, rf.nextIndex, rf.matchIndex)
 		}
 		rf.electionTimer.Stop()
 		rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
@@ -513,16 +506,25 @@ func (rf *Raft) changeState(role Role) {
 }
 
 // createAppendEntriesRequest 创建AppendEntries请求
-func (rf *Raft) createAppendEntriesRequest(prevLogIndex int) *AppendEntriesArgs {
+func (rf *Raft) createAppendEntriesRequest(prevLogIndex int, isHeartBeat bool) *AppendEntriesArgs {
 	firstIdx := rf.getFirstLog().Index
 	//slice数组是左开右闭
+	if isHeartBeat {
+		return &AppendEntriesArgs{
+			Term:            rf.currentTerm,
+			LeaderId:        rf.me,
+			PrevLogIndex:    prevLogIndex,
+			PrevLogTerm:     rf.Entries[prevLogIndex].Term, //Entries:         entries,
+			LeaderCommitIdx: rf.commitIndex,
+		}
+	}
 	entries := make([]LogEntry, len(rf.Entries[prevLogIndex+1-firstIdx:]))
 	copy(entries, rf.Entries[prevLogIndex+1-firstIdx:])
 	return &AppendEntriesArgs{
 		Term:            rf.currentTerm,
 		LeaderId:        rf.me,
 		PrevLogIndex:    prevLogIndex,
-		PrevLogTerm:     rf.Entries[prevLogIndex].Term,
+		PrevLogTerm:     rf.Entries[prevLogIndex].Term, //Entries:         entries,
 		Entries:         entries,
 		LeaderCommitIdx: rf.commitIndex,
 	}
