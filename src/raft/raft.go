@@ -154,7 +154,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.electionTimer.Reset(RandomElectionDuration())
 	defer rf.mu.Unlock()
-	DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}", rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
+	//DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}", rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
 	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
@@ -174,20 +174,23 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 
 // replicator 向follower 发送AppendEntries RPC
 func (rf *Raft) replicator() {
-	DPrintf(dLeader, "S%v start replicate", rf.me)
+	//DPrintf(dLeader, "S%v start replicate", rf.me)
 	for i, peer := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		go func(index int, peer *labrpc.ClientEnd) {
 			rf.mu.Lock()
+			//if rf.matchIndex[index] >= rf.getLastLog().Index {
+			//	rf.mu.Unlock()
+			//	return
+			//}
 			appendEntryArgs := rf.createAppendEntriesRequest(rf.nextIndex[index] - 1)
 			rf.mu.Unlock()
 			appendEntryReply := &AppendEntriesReply{}
 			//DPrintf(dLog2, "S%v send append entry to S%v entries:%v", rf.me, index, appendEntryArgs.Entries)
 			if rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply) {
 				rf.mu.Lock()
-
 				rf.handleAppendEntriesResponse(index, appendEntryArgs, appendEntryReply)
 				rf.mu.Unlock()
 			}
@@ -217,7 +220,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	// Your code here (2B).
 	entry := rf.appendNewEntry(command)
-	//DPrintf(dLeader, "S%v save log at index: %v data: %v", rf.me, entry.Index, rf.Entries)
+	DPrintf(dLeader, "S%v save log at index: %v data: %v", rf.me, entry.Index, rf.Entries)
 	rf.replicator()
 	return entry.Index, entry.Term, rf.state == Leader
 }
@@ -234,7 +237,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	DPrintf(dWarn, "S%v killed", rf.me)
+	//DPrintf(dWarn, "S%v killed", rf.me)
 }
 
 func (rf *Raft) killed() bool {
@@ -317,6 +320,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			break
 		}
 	}
+	//DPrintf(dLog, "S%v recv appendentry from %v entries:%v", rf.me, request.LeaderId, request.Entries)
 	rf.updateCommitIdxForFollower(request.LeaderCommitIdx)
 	response.Term, response.Success = rf.currentTerm, true
 	return
@@ -329,7 +333,7 @@ func (rf *Raft) StartElection() {
 	rf.votedFor = rf.me
 	rf.changeState(Candidate)
 	rf.currentTerm += 1
-	DPrintf(dTimer, "S%v start election Term:%v", rf.me, rf.currentTerm)
+	//DPrintf(dTimer, "S%v start election Term:%v", rf.me, rf.currentTerm)
 	var grantedVotes = 1
 	requestVoteArgs := &RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -359,7 +363,7 @@ func (rf *Raft) StartElection() {
 							return
 						}
 					} else if reply.Term > rf.currentTerm {
-						DPrintf(dClient, "S%v finds new leader S%v with Term %v", rf.me, peer, reply.Term)
+						//DPrintf(dClient, "S%v finds new leader S%v with Term %v", rf.me, peer, reply.Term)
 						rf.changeState(Follower)
 						rf.currentTerm, rf.votedFor = reply.Term, -1
 					}
@@ -436,6 +440,7 @@ func (rf *Raft) applier() {
 		entries := make([]LogEntry, commitIdx-lastApplied)
 		copy(entries, rf.Entries[lastApplied+1-firstIdx:commitIdx+1-firstIdx])
 		//DPrintf(dClient, "S%v start apply msgs to Server state:{firstIdx:%v commitIdx:%v lastApplied:%v nextIndex:%v matchIndex:%v} entries to apply:%v", rf.me, rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied, rf.nextIndex, rf.matchIndex, entries)
+		rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
 		rf.mu.Unlock()
 		for _, entry := range entries {
 			rf.appCh <- ApplyMsg{
@@ -444,12 +449,11 @@ func (rf *Raft) applier() {
 				CommandIndex: entry.Index,
 				CommandTerm:  entry.Term,
 			}
-			DPrintf(dCommit, "S%v apply %v succeed", rf.me, entry)
+			DPrintf(dCommit, "S%v apply %v succeed index:%v", rf.me, entry, entry.Index)
 		}
-		rf.mu.Lock()
-		DPrintf(dCommit, "S%v applies entries %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
-		rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
-		rf.mu.Unlock()
+		//rf.mu.Lock() 修改锁粒度之后(跟上面锁合并之后解决2B ConcurrentStarts,Count无法通过的问题)
+		//DPrintf(dCommit, "S%v applies entries %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
+		//rf.mu.Unlock()
 	}
 }
 
@@ -555,11 +559,10 @@ func (rf *Raft) updateCommitIdxForLeader() {
 	copy(dist, rf.matchIndex)
 	sort.Ints(dist)
 	newCommitIdx := dist[n-(n/2+1)]
-	//DPrintf(dInfo, "S%v entry state:%v", rf.me, rf.Entries)
 	if newCommitIdx > rf.commitIndex {
 		if rf.matchLog(rf.currentTerm, newCommitIdx) {
+			DPrintf(dLeader, "S%v update commitIdx from %v->%v Entries:%v", rf.me, rf.commitIndex, newCommitIdx, rf.Entries)
 			rf.commitIndex = newCommitIdx
-			DPrintf(dLeader, "S%v trying to update commit:%v", rf.me, newCommitIdx)
 			rf.applyCond.Signal()
 		}
 	}

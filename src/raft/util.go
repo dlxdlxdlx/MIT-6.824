@@ -38,8 +38,8 @@ const (
 )
 
 const (
-	heartbeatTimeout   = 100
-	minElectionTimeout = 250
+	heartbeatTimeout   = 125
+	minElectionTimeout = 200
 	maxElectionTimeout = 350
 )
 
