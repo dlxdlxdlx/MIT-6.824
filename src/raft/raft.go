@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	"math/rand"
 	"sort"
 
@@ -108,6 +110,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// Payload := w.Bytes()
 	// rf.persister.SaveRaftState(Payload)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.Entries)
+	Payload := w.Bytes()
+	rf.persister.SaveRaftState(Payload)
 }
 
 // restore previously persisted state.
@@ -128,6 +137,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var voteFor int
+	var Entries []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&voteFor) != nil ||
+		d.Decode(&Entries) != nil {
+		DPrintf(dError, "S%v readPersist error", rf.me)
+	}
+	rf.currentTerm, rf.votedFor, rf.Entries = currentTerm, voteFor, Entries
+
+	rf.lastApplied, rf.commitIndex = rf.Entries[0].Index, rf.Entries[0].Index
 }
 
 // CondInstallSnapshot A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -174,21 +196,16 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 
 // replicator 向follower 发送AppendEntries RPC
 func (rf *Raft) replicator() {
-	//DPrintf(dLeader, "S%v start replicate", rf.me)
 	for i, peer := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		go func(index int, peer *labrpc.ClientEnd) {
 			rf.mu.Lock()
-			//if rf.matchIndex[index] >= rf.getLastLog().Index {
-			//	rf.mu.Unlock()
-			//	return
-			//}
+
 			appendEntryArgs := rf.createAppendEntriesRequest(rf.nextIndex[index] - 1)
 			rf.mu.Unlock()
 			appendEntryReply := &AppendEntriesReply{}
-			//DPrintf(dLog2, "S%v send append entry to S%v entries:%v", rf.me, index, appendEntryArgs.Entries)
 			if rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply) {
 				rf.mu.Lock()
 				rf.handleAppendEntriesResponse(index, appendEntryArgs, appendEntryReply)
@@ -220,7 +237,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	// Your code here (2B).
 	entry := rf.appendNewEntry(command)
-	DPrintf(dLeader, "S%v save log at index: %v data: %v", rf.me, entry.Index, rf.Entries)
+	rf.persist()
+	DPrintf(dLeader, "S%v save log at index: %v", rf.me, entry.Index)
 	rf.replicator()
 	return entry.Index, entry.Term, rf.state == Leader
 }
@@ -269,6 +287,7 @@ func (rf *Raft) ticker() {
 // AppendEntries 添加日志条目, 同时也可以作为心跳机制RPC调用
 func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.persist()
 	defer rf.mu.Unlock()
 
 	if request.Term < rf.currentTerm {
@@ -285,7 +304,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		DPrintf(dLog, "S%v recv unknown RPC from %v", rf.me, request.LeaderId)
 		return
 	}
-	//defer rf.applyCond.Signal()
 	if !rf.matchLog(request.PrevLogTerm, request.PrevLogIndex) {
 		response.Term, response.Success = rf.currentTerm, false
 		lastIdx := rf.getLastLog().Index
@@ -358,13 +376,15 @@ func (rf *Raft) StartElection() {
 						grantedVotes += 1
 						if grantedVotes > len(rf.peers)/2 {
 							rf.changeState(Leader)
-							DPrintf(dInfo, "S%v become leader Term %v, Entries state:{%v}", rf.me, rf.currentTerm, rf.Entries)
+							DPrintf(dInfo, "S%v become leader Term %v", rf.me, rf.currentTerm)
+							rf.persist()
 							rf.BroadcastHeartBeat()
 							return
 						}
 					} else if reply.Term > rf.currentTerm {
 						//DPrintf(dClient, "S%v finds new leader S%v with Term %v", rf.me, peer, reply.Term)
 						rf.changeState(Follower)
+						rf.persist()
 						rf.currentTerm, rf.votedFor = reply.Term, -1
 					}
 				}
@@ -449,7 +469,6 @@ func (rf *Raft) applier() {
 				CommandIndex: entry.Index,
 				CommandTerm:  entry.Term,
 			}
-			DPrintf(dCommit, "S%v apply %v succeed index:%v", rf.me, entry, entry.Index)
 		}
 		//rf.mu.Lock() 修改锁粒度之后(跟上面锁合并之后解决2B ConcurrentStarts,Count无法通过的问题)
 		//DPrintf(dCommit, "S%v applies entries %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
@@ -486,6 +505,7 @@ func (rf *Raft) appendNewEntry(command interface{}) LogEntry {
 
 // changeState 改变角色状态
 func (rf *Raft) changeState(role Role) {
+	defer rf.persist()
 	if rf.state == role {
 		return
 	}
