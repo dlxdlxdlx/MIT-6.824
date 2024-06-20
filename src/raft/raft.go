@@ -344,11 +344,11 @@ func (rf *Raft) StartElection() {
 		}
 		go func(peer int) {
 			reply := &RequestVoteReply{}
-			DPrintf(dInfo, "S%v send RequestVote -> S%v", rf.me, peer)
+			//DPrintf(dInfo, "S%v send RequestVote -> S%v", rf.me, peer)
 			if rf.sendRequestVote(peer, requestVoteArgs, reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				DPrintf(dInfo, "S%v recv requestVoteResponse %v from %v", rf.me, reply, peer)
+				//DPrintf(dInfo, "S%v recv requestVoteResponse %v from %v", rf.me, reply, peer)
 				if rf.currentTerm == requestVoteArgs.Term && rf.state == Candidate {
 					if reply.VotedGranted {
 						grantedVotes += 1
@@ -444,7 +444,7 @@ func (rf *Raft) applier() {
 				CommandIndex: entry.Index,
 				CommandTerm:  entry.Term,
 			}
-			DPrintf(dCommit, "S%v apply %v succeed", rf.me, entry.Index)
+			DPrintf(dCommit, "S%v apply %v succeed", rf.me, entry)
 		}
 		rf.mu.Lock()
 		DPrintf(dCommit, "S%v applies entries %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
