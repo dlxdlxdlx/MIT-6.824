@@ -1,5 +1,7 @@
 package raft
 
+import "fmt"
+
 // RequestVoteArgs example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
@@ -57,6 +59,10 @@ type LogEntry struct {
 	Term    int
 	Index   int
 	Payload interface{}
+}
+
+func (entry LogEntry) String() string {
+	return fmt.Sprintf("{Term:%v Index:%v payload:%v}", entry.Term, entry.Index, entry.Payload)
 }
 
 func (rf *Raft) sendAppendEntries(peer int, args *AppendEntriesArgs, replys *AppendEntriesReply) bool {

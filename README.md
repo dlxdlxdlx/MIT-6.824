@@ -42,3 +42,11 @@ MIT 6.824 课程的学习资料 代码更新为2021版
 
 # 记录
 ![img](./resource/img.png)
+
+
+**2024-06-21**
+RNM!!!!
+![bug](./resource/img_1.png)
+错误可复现性比较难
+![bug](./resource/img_2.png)
+在发生了什么会导致日志提交出现不一致情况
