@@ -64,6 +64,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 		return
 	}
 	defer rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
+	DPrintf(dLeader, "S%v start send heartbeat", rf.me)
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -75,11 +76,9 @@ func (rf *Raft) BroadcastHeartBeat() {
 			response := &AppendEntriesReply{}
 			if rf.sendAppendEntries(peer, request, response) {
 				rf.mu.Lock()
-				//DPrintf(dTrace, "S%v recv heartbeatResp from S%v resp:%v", rf.me, peer, response)
 				rf.handleAppendEntriesResponse(peer, request, response)
 				rf.mu.Unlock()
 			}
-
 		}(i)
 	}
 
@@ -88,12 +87,10 @@ func (rf *Raft) BroadcastHeartBeat() {
 // GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	// Your code here (2A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	currentTerm, state := rf.currentTerm, rf.state == Leader
-	return currentTerm, state
+	return rf.currentTerm, rf.state == Leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -159,10 +156,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	defer rf.electionTimer.Reset(RandomElectionDuration())
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	//DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}", rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
 	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
@@ -175,30 +170,10 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
 	}
-
+	rf.electionTimer.Reset(RandomElectionDuration())
 	rf.votedFor = request.CandidateId
+	DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}", rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
 	reply.Term, reply.VotedGranted = rf.currentTerm, true
-}
-
-// replicator 向follower 发送AppendEntries RPC
-func (rf *Raft) replicator() {
-	for i, peer := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-		go func(index int, peer *labrpc.ClientEnd) {
-			rf.mu.Lock()
-
-			appendEntryArgs := rf.createAppendEntriesRequest(rf.nextIndex[index] - 1)
-			rf.mu.Unlock()
-			appendEntryReply := &AppendEntriesReply{}
-			if rf.sendAppendEntries(index, appendEntryArgs, appendEntryReply) {
-				rf.mu.Lock()
-				rf.handleAppendEntriesResponse(index, appendEntryArgs, appendEntryReply)
-				rf.mu.Unlock()
-			}
-		}(i, peer)
-	}
 }
 
 // Start the service using Raft (e.g. a k/v server) wants to start
@@ -214,16 +189,14 @@ func (rf *Raft) replicator() {
 // Term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.state != Leader {
-		return index, term, false
+		return -1, -1, false
 	}
 	// Your code here (2B).
 	entry := rf.appendNewEntry(command)
-	DPrintf(dLeader, "S%v save log at index: %v  %v", rf.me, entry.Index, entry.String())
+	DPrintf(dLeader, "S%v deliver entry:%v", rf.me, entry)
 	return entry.Index, entry.Term, rf.state == Leader
 }
 
@@ -257,14 +230,15 @@ func (rf *Raft) ticker() {
 		case <-rf.electionTimer.C:
 			rf.mu.Lock()
 			rf.StartElection()
+			rf.electionTimer.Reset(RandomElectionDuration())
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
 			_, isLeader := rf.GetState()
+			rf.mu.Lock()
 			if isLeader {
-				rf.mu.Lock()
 				rf.BroadcastHeartBeat()
-				rf.mu.Unlock()
 			}
+			rf.mu.Unlock()
 		}
 
 	}
@@ -305,17 +279,6 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		}
 		return
 	}
-
-	// 评估日志冲突以及解决日志冲突
-	//2. Reply false if log doesn’t contain an entry at prevLogIndex
-	//whose Term matches prevLogTerm (§5.3)
-
-	//3. If an existing entry conflicts with a new one (same index but different terms),
-	//   delete the existing entry and all that follow it (§5.3)
-	// 日志复制冲突章节参考Figure 8  两种情况,一种日志领先Leader 一种落后Leader
-	// 日志领先Leader 可以通过删除冲突的日志条目来解决冲突
-	// 但是日志落后Leader则需要通过leader修改nextIndex数组
-	//TODO 重构
 	firstIdx := rf.getFirstLog().Index
 	for idx, entry := range request.Entries {
 		if entry.Index-firstIdx >= len(rf.Entries) || rf.Entries[entry.Index-firstIdx].Term != entry.Term {
@@ -323,22 +286,20 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 			break
 		}
 	}
-	//DPrintf(dLog, "S%v recv appendentry from %v entries:%v", rf.me, request.LeaderId, request.Entries)
 	rf.updateCommitIdxForFollower(request.LeaderCommitIdx)
+
 	response.Term, response.Success = rf.currentTerm, true
 	return
 }
 
 // StartElection 在Election timeout之后发起选举
 func (rf *Raft) StartElection() {
-	defer rf.electionTimer.Reset(RandomElectionDuration())
 	rf.votedFor = rf.me
 	rf.changeState(Candidate)
 	rf.currentTerm += 1
 	var grantedVotes = 1
 	requestVoteArgs := rf.createRequestVoteArgs()
 	rf.persist()
-	rf.electionTimer.Reset(RandomElectionDuration())
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -349,7 +310,6 @@ func (rf *Raft) StartElection() {
 			if rf.sendRequestVote(peer, requestVoteArgs, reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				//DPrintf(dInfo, "S%v recv requestVoteResponse %v from %v", rf.me, reply, peer)
 				if rf.currentTerm == requestVoteArgs.Term && rf.state == Candidate {
 					if reply.VotedGranted {
 						grantedVotes += 1
@@ -357,9 +317,9 @@ func (rf *Raft) StartElection() {
 							rf.changeState(Leader)
 							DPrintf(dInfo, "S%v become leader Term %v last data:%v", rf.me, rf.currentTerm, rf.Entries[len(rf.Entries)-1].String())
 							rf.BroadcastHeartBeat()
+							return
 						}
 					} else if reply.Term > rf.currentTerm {
-						//DPrintf(dClient, "S%v finds new leader S%v with Term %v", rf.me, peer, reply.Term)
 						rf.changeState(Follower)
 						rf.currentTerm, rf.votedFor = reply.Term, -1
 						rf.persist()
@@ -369,17 +329,6 @@ func (rf *Raft) StartElection() {
 		}(peer)
 
 	}
-}
-
-func (rf *Raft) GetPrevLogIndex() int {
-	return len(rf.Entries) - 1
-}
-
-func (rf *Raft) GetPrevLogTerm() int {
-	if len(rf.Entries) == 0 {
-		return -1
-	}
-	return rf.Entries[len(rf.Entries)-1].Term
 }
 
 // RandomElectionDuration 随机初始化选举超时时间
@@ -438,7 +387,6 @@ func (rf *Raft) applier() {
 		copy(entries, rf.Entries[lastApplied+1-firstIdx:commitIdx+1-firstIdx])
 		DPrintf(dClient, "S%v start apply msgs Index %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
 		rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
-		rf.mu.Unlock()
 		for _, entry := range entries {
 			rf.appCh <- ApplyMsg{
 				CommandValid: true,
@@ -446,7 +394,9 @@ func (rf *Raft) applier() {
 				CommandIndex: entry.Index,
 				CommandTerm:  entry.Term,
 			}
+			DPrintf(dClient, "S%v entry:%v applied", rf.me, entry)
 		}
+		rf.mu.Unlock()
 		//rf.mu.Lock() 修改锁粒度之后(跟上面锁合并之后解决2B ConcurrentStarts,Count无法通过的问题)
 		//DPrintf(dCommit, "S%v applies entries %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
 		//rf.mu.Unlock()
@@ -463,7 +413,7 @@ func (rf *Raft) getFirstLog() LogEntry {
 	return rf.Entries[0]
 }
 func (rf *Raft) matchLog(term, index int) bool {
-	return index <= rf.getLastLog().Index && term == rf.Entries[index].Term
+	return index <= rf.getLastLog().Index && term == rf.Entries[index-rf.getFirstLog().Index].Term
 }
 func (rf *Raft) appendNewEntry(command interface{}) LogEntry {
 	lastLog := rf.getLastLog()
@@ -475,9 +425,7 @@ func (rf *Raft) appendNewEntry(command interface{}) LogEntry {
 	rf.Entries = append(rf.Entries, newLog)
 	rf.matchIndex[rf.me], rf.nextIndex[rf.me] = newLog.Index, newLog.Index+1
 	rf.persist()
-
 	return newLog
-
 }
 
 // changeState 改变角色状态
@@ -485,6 +433,7 @@ func (rf *Raft) changeState(role Role) {
 	if rf.state == role {
 		return
 	}
+	DPrintf(dLog2, "S%v changed from %v -> %v", rf.me, rf.state, role)
 	rf.state = role
 	switch rf.state {
 	case Follower:
@@ -493,6 +442,10 @@ func (rf *Raft) changeState(role Role) {
 	case Leader:
 		lastLog := rf.getLastLog()
 		for i := 0; i < len(rf.peers); i++ {
+			if rf.me == i {
+				rf.nextIndex[i] = lastLog.Index + 1
+				continue
+			}
 			rf.matchIndex[i], rf.nextIndex[i] = 0, lastLog.Index+1
 		}
 		rf.electionTimer.Stop()
@@ -513,7 +466,7 @@ func (rf *Raft) createAppendEntriesRequest(prevLogIndex int) *AppendEntriesArgs 
 		Term:            rf.currentTerm,
 		LeaderId:        rf.me,
 		PrevLogIndex:    prevLogIndex,
-		PrevLogTerm:     rf.Entries[prevLogIndex].Term, //Entries:         entries,
+		PrevLogTerm:     rf.Entries[prevLogIndex-firstIdx].Term, //Entries:         entries,
 		Entries:         entries,
 		LeaderCommitIdx: rf.commitIndex,
 	}
@@ -550,6 +503,9 @@ func (rf *Raft) handleAppendEntriesResponse(peer int, request *AppendEntriesArgs
 }
 
 func (rf *Raft) updateCommitIdxForLeader() {
+	if rf.state != Leader {
+		return
+	}
 	n := len(rf.matchIndex)
 	dist := make([]int, n)
 	copy(dist, rf.matchIndex)
@@ -564,9 +520,12 @@ func (rf *Raft) updateCommitIdxForLeader() {
 	}
 }
 func (rf *Raft) updateCommitIdxForFollower(commitIdx int) {
+	if rf.state != Follower {
+		return
+	}
 	newCommitIdx := min(commitIdx, rf.getLastLog().Index)
 	if newCommitIdx > rf.commitIndex {
-		//DPrintf(dLog2, "S%v update commit from %v -> %v in term %v", rf.me, rf.commitIndex, newCommitIdx, rf.currentTerm)
+		DPrintf(dLog2, "S%v update commit from %v -> %v in term %v", rf.me, rf.commitIndex, newCommitIdx, rf.currentTerm)
 		rf.commitIndex = newCommitIdx
 		rf.applyCond.Signal()
 	}

@@ -38,9 +38,9 @@ const (
 )
 
 const (
-	heartbeatTimeout   = 125
-	minElectionTimeout = 200
-	maxElectionTimeout = 350
+	heartbeatTimeout   = 100
+	minElectionTimeout = 300
+	maxElectionTimeout = 450
 )
 
 type Role int

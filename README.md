@@ -49,4 +49,6 @@ RNM!!!!
 ![bug](./resource/img_1.png)
 错误可复现性比较难
 ![bug](./resource/img_2.png)
+![bug](./resource/img_3.png)
 在发生了什么会导致日志提交出现不一致情况
+![bug](./resource/img_4.png)

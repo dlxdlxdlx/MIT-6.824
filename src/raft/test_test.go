@@ -418,6 +418,7 @@ func TestBackup2B(t *testing.T) {
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
+	// s3 leader
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
@@ -430,12 +431,17 @@ func TestBackup2B(t *testing.T) {
 	time.Sleep(RaftElectionTimeout / 2)
 
 	cfg.disconnect((leader1 + 0) % servers)
+	DPrintf(dInfo, "S%v line 433 disconnected", (leader1+0)%servers)
 	cfg.disconnect((leader1 + 1) % servers)
+	DPrintf(dInfo, "S%v line 435 disconnected", (leader1+1)%servers)
 
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
+	DPrintf(dInfo, "S%v lin 439 connected", (leader1+2)%servers)
 	cfg.connect((leader1 + 3) % servers)
+	DPrintf(dInfo, "S%v line 441 connected", (leader1+3)%servers)
 	cfg.connect((leader1 + 4) % servers)
+	DPrintf(dInfo, "S%v line 443 connected", (leader1+4)%servers)
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
@@ -449,8 +455,9 @@ func TestBackup2B(t *testing.T) {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
+	DPrintf(dInfo, "S%v line 457 disconnected", other)
 
-	// lots more commands that won't commit
+	// lots more commands that won't commit -> 目前leader只能联系到一个follower
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
@@ -460,10 +467,14 @@ func TestBackup2B(t *testing.T) {
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
+		DPrintf(dInfo, "S%v line 467 disconnected", i)
 	}
 	cfg.connect((leader1 + 0) % servers)
+	DPrintf(dInfo, "S%v line 472 connected", (leader1+0)%servers)
 	cfg.connect((leader1 + 1) % servers)
+	DPrintf(dInfo, "S%v line 474 connected", (leader1+1)%servers)
 	cfg.connect(other)
+	DPrintf(dInfo, "S%v line 476 connected", other)
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
