@@ -34,7 +34,7 @@ import (
 
 // Raft A Go object implementing a single Raft clientEnd.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this clientEnd's state
+	mu        sync.RWMutex        // Lock to protect shared access to this clientEnd's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this clientEnd's persisted state
 	me        int                 // this clientEnd's index into peers[]
@@ -77,8 +77,8 @@ func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 	return rf.currentTerm, rf.state == Leader
 }
 
@@ -151,8 +151,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
-
 	defer rf.mu.Unlock()
+
 	snapshotIdx := rf.getFirstLog().Index
 	if index <= snapshotIdx {
 		return
@@ -239,7 +239,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry := rf.appendNewEntry(command)
 	DPrintf(dLeader, "S%v deliver entry:%v", rf.me, entry)
 	rf.BroadcastHeartbeat(false)
-	return entry.Index, entry.Term, rf.state == Leader
+	return entry.Index, entry.Term, true
 }
 
 // Kill the tester doesn't halt goroutines created by Raft after each test,
@@ -275,9 +275,8 @@ func (rf *Raft) ticker() {
 			rf.electionTimer.Reset(RandomElectionDuration())
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
-			_, isLeader := rf.GetState()
 			rf.mu.Lock()
-			if isLeader {
+			if rf.state == Leader {
 				rf.BroadcastHeartbeat(true)
 				rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
 			}
@@ -380,9 +379,9 @@ func (rf *Raft) needReplicate(peer int) bool {
 }
 
 func (rf *Raft) replicateOneRound(peer int) {
-	rf.mu.Lock()
+	rf.mu.RLock()
 	if rf.state != Leader {
-		rf.mu.Unlock()
+		rf.mu.RUnlock()
 		return
 	}
 	prevLogIdx := rf.nextIndex[peer] - 1
@@ -396,7 +395,7 @@ func (rf *Raft) replicateOneRound(peer int) {
 			LastIncludedTerm:  firstLog.Term,
 			Data:              rf.persister.ReadSnapshot(),
 		}
-		rf.mu.Unlock()
+		rf.mu.RUnlock()
 		response := &InstallSnapshotResponse{}
 		if rf.sendInstallSnapshot(peer, request, response) {
 			rf.mu.Lock()
@@ -406,7 +405,7 @@ func (rf *Raft) replicateOneRound(peer int) {
 		}
 	} else {
 		request := rf.createAppendEntriesRequest(prevLogIdx)
-		rf.mu.Unlock()
+		rf.mu.RUnlock()
 		response := new(AppendEntriesReply)
 		if rf.sendAppendEntries(peer, request, response) {
 			rf.mu.Lock()
@@ -500,6 +499,7 @@ func (rf *Raft) applier() {
 		entries := make([]LogEntry, commitIdx-lastApplied)
 		copy(entries, rf.Entries[lastApplied+1-firstIdx:commitIdx+1-firstIdx])
 		DPrintf(dClient, "S%v start apply msgs Index %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
+		rf.mu.Unlock()
 		for _, entry := range entries {
 			rf.appCh <- ApplyMsg{
 				CommandValid: true,
@@ -509,6 +509,7 @@ func (rf *Raft) applier() {
 			}
 			DPrintf(dClient, "S%v entry:%v applied", rf.me, entry)
 		}
+		rf.mu.Lock()
 		rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
 		rf.mu.Unlock()
 	}
