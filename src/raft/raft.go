@@ -60,9 +60,6 @@ type Raft struct {
 }
 
 func (rf *Raft) BroadcastHeartBeat() {
-	if rf.state != Leader {
-		return
-	}
 	defer rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
 	DPrintf(dLeader, "S%v start send heartbeat", rf.me)
 	for i := 0; i < len(rf.peers); i++ {
@@ -71,6 +68,10 @@ func (rf *Raft) BroadcastHeartBeat() {
 		}
 		go func(peer int) {
 			rf.mu.Lock()
+			if rf.state != Leader {
+				rf.mu.Unlock()
+				return
+			}
 			request := rf.createAppendEntriesRequest(rf.nextIndex[peer] - 1)
 			rf.mu.Unlock()
 			response := &AppendEntriesReply{}
@@ -158,7 +159,7 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId) {
+	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1) {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
 	}
@@ -166,13 +167,14 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.changeState(Follower)
 		rf.currentTerm, rf.votedFor = request.Term, -1
 	}
-	if !rf.LogUpToDate(request.LastLogTerm, request.LastLogIndex) {
+	isLogUpdateToDate := rf.LogUpToDate(request.LastLogTerm, request.LastLogIndex)
+	if !isLogUpdateToDate {
 		reply.Term, reply.VotedGranted = rf.currentTerm, false
 		return
 	}
+	DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v lastLog:%v}  requestVoteArgs:%v , isLogUpdateTodate:%v", rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, rf.getLastLog(), request, isLogUpdateToDate)
 	rf.electionTimer.Reset(RandomElectionDuration())
 	rf.votedFor = request.CandidateId
-	DPrintf(dLog, "S%v recvd vote request from S%v self-state:{CT:%v VF: %v} candidate-state:{CT:%v}", rf.me, request.CandidateId, rf.currentTerm, rf.votedFor, request.Term)
 	reply.Term, reply.VotedGranted = rf.currentTerm, true
 }
 
@@ -279,6 +281,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		}
 		return
 	}
+	DPrintf(dLog, "S%v recv AE from S%v currentstate:{CT:%v LastLogIndex:%v LostLogTerm:%v}  requestArgs:{T:%v PrevLogIndex:%v PrevLogTerm:%v }", rf.me, request.LeaderId, rf.currentTerm, rf.getLastLog().Index, rf.getLastLog().Term, request.Term, request.PrevLogIndex, request.PrevLogTerm)
 	firstIdx := rf.getFirstLog().Index
 	for idx, entry := range request.Entries {
 		if entry.Index-firstIdx >= len(rf.Entries) || rf.Entries[entry.Index-firstIdx].Term != entry.Term {
@@ -386,7 +389,6 @@ func (rf *Raft) applier() {
 		entries := make([]LogEntry, commitIdx-lastApplied)
 		copy(entries, rf.Entries[lastApplied+1-firstIdx:commitIdx+1-firstIdx])
 		DPrintf(dClient, "S%v start apply msgs Index %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
-		rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
 		for _, entry := range entries {
 			rf.appCh <- ApplyMsg{
 				CommandValid: true,
@@ -396,10 +398,8 @@ func (rf *Raft) applier() {
 			}
 			DPrintf(dClient, "S%v entry:%v applied", rf.me, entry)
 		}
+		rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
 		rf.mu.Unlock()
-		//rf.mu.Lock() 修改锁粒度之后(跟上面锁合并之后解决2B ConcurrentStarts,Count无法通过的问题)
-		//DPrintf(dCommit, "S%v applies entries %v ~ %v in term %v", rf.me, rf.lastApplied, rf.commitIndex, rf.currentTerm)
-		//rf.mu.Unlock()
 	}
 }
 
