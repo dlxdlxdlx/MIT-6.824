@@ -60,7 +60,7 @@ type Raft struct {
 	heartbeatTimer *time.Timer
 }
 
-func (rf *Raft) broadCastHeartbeat(isHeartBeat bool) {
+func (rf *Raft) BroadcastHeartbeat(isHeartBeat bool) {
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -72,36 +72,6 @@ func (rf *Raft) broadCastHeartbeat(isHeartBeat bool) {
 		}
 	}
 }
-
-//func (rf *Raft) BroadcastHeartBeat() {
-//	defer rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
-//	DPrintf(dLeader, "S%v start send heartbeat", rf.me)
-//	for i := 0; i < len(rf.peers); i++ {
-//		if i == rf.me {
-//			continue
-//		}
-//		go func(peer int) {
-//			rf.mu.Lock()
-//			if rf.state != Leader {
-//				rf.mu.Unlock()
-//				return
-//			}
-//			if rf.nextIndex[peer]-1 < 0 {
-//				rf.mu.Unlock()
-//				return
-//			}
-//			request := rf.createAppendEntriesRequest(rf.nextIndex[peer] - 1)
-//			rf.mu.Unlock()
-//			response := &AppendEntriesReply{}
-//			if rf.sendAppendEntries(peer, request, response) {
-//				rf.mu.Lock()
-//				rf.handleAppendEntriesResponse(peer, request, response)
-//				rf.mu.Unlock()
-//			}
-//		}(i)
-//	}
-//
-//}
 
 // GetState return currentTerm and whether this server
 // believes it is the leader.
@@ -117,20 +87,7 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// Payload := w.Bytes()
-	// rf.persister.SaveRaftState(Payload)
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.Entries)
-	Payload := w.Bytes()
-	rf.persister.SaveRaftState(Payload)
+	rf.persister.SaveRaftState(rf.EncodeState())
 }
 
 // restore previously persisted state.
@@ -153,12 +110,37 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.lastApplied, rf.commitIndex = rf.Entries[0].Index, rf.Entries[0].Index
 }
 
+func (rf *Raft) EncodeState() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.Entries)
+	return w.Bytes()
+}
+
 // CondInstallSnapshot A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if lastIncludedIndex <= rf.commitIndex {
+		return false
+	}
+
+	if lastIncludedIndex > rf.getLastLog().Index {
+		rf.Entries = make([]LogEntry, 1)
+	} else {
+		rf.shrinkEntries(rf.Entries[lastIncludedIndex-rf.getFirstLog().Index:])
+		rf.Entries[0].Payload = nil
+	}
+	rf.Entries[0].Index, rf.Entries[0].Term = lastIncludedIndex, lastIncludedTerm
+	rf.commitIndex, rf.lastApplied = lastIncludedIndex, lastIncludedIndex
+
+	rf.persister.SaveStateAndSnapshot(rf.EncodeState(), snapshot)
 	return true
 }
 
@@ -168,7 +150,46 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
 
+	defer rf.mu.Unlock()
+	snapshotIdx := rf.getFirstLog().Index
+	if index <= snapshotIdx {
+		return
+	}
+	rf.shrinkEntries(rf.Entries[index-snapshotIdx:])
+	rf.Entries[0].Payload = nil
+	rf.persister.SaveStateAndSnapshot(rf.EncodeState(), snapshot)
+
+}
+
+func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	response.Term = rf.currentTerm
+	if request.Term < rf.currentTerm {
+		return
+	}
+	if request.Term > rf.currentTerm {
+		rf.currentTerm, rf.votedFor = request.Term, -1
+		rf.persist()
+	}
+	rf.changeState(Follower)
+	rf.electionTimer.Reset(RandomElectionDuration())
+
+	if request.LastIncludedIndex <= rf.commitIndex {
+		return
+	}
+
+	go func() {
+		rf.appCh <- ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      request.Data,
+			SnapshotIndex: request.LastIncludedIndex,
+			SnapshotTerm:  request.LastIncludedTerm,
+		}
+	}()
 }
 
 // RequestVote RPC handler.
@@ -217,7 +238,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	entry := rf.appendNewEntry(command)
 	DPrintf(dLeader, "S%v deliver entry:%v", rf.me, entry)
-	rf.broadCastHeartbeat(false)
+	rf.BroadcastHeartbeat(false)
 	return entry.Index, entry.Term, rf.state == Leader
 }
 
@@ -257,7 +278,7 @@ func (rf *Raft) ticker() {
 			_, isLeader := rf.GetState()
 			rf.mu.Lock()
 			if isLeader {
-				rf.broadCastHeartbeat(true)
+				rf.BroadcastHeartbeat(true)
 				rf.heartbeatTimer.Reset(heartbeatTimeout * time.Millisecond)
 			}
 			rf.mu.Unlock()
@@ -317,8 +338,8 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 
 // StartElection 在Election timeout之后发起选举
 func (rf *Raft) StartElection() {
-	rf.votedFor = rf.me
 	rf.changeState(Candidate)
+	rf.votedFor = rf.me
 	rf.currentTerm += 1
 	var grantedVotes = 1
 	requestVoteArgs := rf.createRequestVoteArgs()
@@ -329,13 +350,6 @@ func (rf *Raft) StartElection() {
 		}
 		go func(peer int) {
 			reply := &RequestVoteReply{}
-			//DPrintf(dInfo, "S%v send RequestVote -> S%v", rf.me, peer)
-			rf.mu.Lock()
-			if rf.state != Candidate {
-				rf.mu.Unlock()
-				return
-			}
-			rf.mu.Unlock()
 			if rf.sendRequestVote(peer, requestVoteArgs, reply) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
@@ -345,7 +359,7 @@ func (rf *Raft) StartElection() {
 						if grantedVotes > len(rf.peers)/2 {
 							rf.changeState(Leader)
 							DPrintf(dInfo, "S%v become leader Term %v last data:%v", rf.me, rf.currentTerm, rf.Entries[len(rf.Entries)-1].String())
-							rf.broadCastHeartbeat(true)
+							rf.BroadcastHeartbeat(true)
 						}
 					} else if reply.Term > rf.currentTerm {
 						rf.changeState(Follower)
@@ -374,10 +388,26 @@ func (rf *Raft) replicateOneRound(peer int) {
 	prevLogIdx := rf.nextIndex[peer] - 1
 	if prevLogIdx < rf.getFirstLog().Index {
 		//todo
+		firstLog := rf.getFirstLog()
+		request := &InstallSnapshotRequest{
+			Term:              rf.currentTerm,
+			LeaderId:          rf.me,
+			LastIncludedIndex: firstLog.Index,
+			LastIncludedTerm:  firstLog.Term,
+			Data:              rf.persister.ReadSnapshot(),
+		}
+		rf.mu.Unlock()
+		response := &InstallSnapshotResponse{}
+		if rf.sendInstallSnapshot(peer, request, response) {
+			rf.mu.Lock()
+			rf.handleInstallSnapshotResponse(peer, request, response)
+			rf.mu.Unlock()
+
+		}
 	} else {
 		request := rf.createAppendEntriesRequest(prevLogIdx)
 		rf.mu.Unlock()
-		response := &AppendEntriesReply{}
+		response := new(AppendEntriesReply)
 		if rf.sendAppendEntries(peer, request, response) {
 			rf.mu.Lock()
 			rf.handleAppendEntriesResponse(peer, request, response)
@@ -385,7 +415,20 @@ func (rf *Raft) replicateOneRound(peer int) {
 		}
 	}
 }
-
+func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
+	if rf.state == Leader && rf.currentTerm == request.Term {
+		if response.Term > rf.currentTerm {
+			rf.changeState(Follower)
+			rf.currentTerm, rf.votedFor = response.Term, -1
+			rf.persist()
+		}
+	} else {
+		rf.matchIndex[peer], rf.nextIndex[peer] = request.LastIncludedIndex, request.LastIncludedIndex+1
+	}
+}
+func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) bool {
+	return rf.peers[server].Call("Raft.InstallSnapshot", request, response)
+}
 func (rf *Raft) replicator(peer int) {
 	rf.replicatorCond[peer].L.Lock()
 	defer rf.replicatorCond[peer].L.Unlock()
@@ -427,13 +470,13 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		electionTimer:  time.NewTimer(RandomElectionDuration()),
 	}
 	// Your initialization code here (2A, 2B, 2C).
-	rf.applyCond = sync.NewCond(&rf.mu)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	rf.applyCond = sync.NewCond(&rf.mu)
+	lastLog := rf.getFirstLog()
 	for i := 0; i < len(rf.peers); i++ {
-		rf.nextIndex[i], rf.matchIndex[i] = rf.getLastLog().Index+1, 0
+		rf.nextIndex[i], rf.matchIndex[i] = lastLog.Index+1, 0
 		if i != rf.me {
 			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
 			go rf.replicator(i)
@@ -510,10 +553,6 @@ func (rf *Raft) changeState(role Role) {
 	case Leader:
 		lastLog := rf.getLastLog()
 		for i := 0; i < len(rf.peers); i++ {
-			if rf.me == i {
-				rf.nextIndex[i] = lastLog.Index + 1
-				continue
-			}
 			rf.matchIndex[i], rf.nextIndex[i] = 0, lastLog.Index+1
 		}
 		rf.electionTimer.Stop()
