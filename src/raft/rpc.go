@@ -35,17 +35,6 @@ type AppendEntriesReply struct {
 	Success      bool //true if follower contained entry matching PrevLogIndex and PrevLogTerm
 }
 
-type InstallSnapshotRequest struct {
-	Term              int
-	LeaderId          int
-	LastIncludedIndex int
-	LastIncludedTerm  int
-	Data              []byte
-}
-type InstallSnapshotResponse struct {
-	Term int
-}
-
 // ApplyMsg as each Raft clientEnd becomes aware that successive log Entries are
 // committed, the clientEnd should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set

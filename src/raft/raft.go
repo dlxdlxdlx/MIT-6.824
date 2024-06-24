@@ -95,6 +95,7 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+	DPrintf(dLog2, "S%v start read persist info", rf.me)
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var currentTerm int
@@ -126,7 +127,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	DPrintf(dLog2, "S%v CondInstall snapshot", rf.me)
 	if lastIncludedIndex <= rf.commitIndex {
 		return false
 	}
@@ -134,13 +135,14 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	if lastIncludedIndex > rf.getLastLog().Index {
 		rf.Entries = make([]LogEntry, 1)
 	} else {
-		rf.shrinkEntries(rf.Entries[lastIncludedIndex-rf.getFirstLog().Index:])
+		rf.Entries = shrinkEntries(rf.Entries[lastIncludedIndex-rf.getFirstLog().Index:])
 		rf.Entries[0].Payload = nil
 	}
 	rf.Entries[0].Index, rf.Entries[0].Term = lastIncludedIndex, lastIncludedTerm
 	rf.commitIndex, rf.lastApplied = lastIncludedIndex, lastIncludedIndex
 
 	rf.persister.SaveStateAndSnapshot(rf.EncodeState(), snapshot)
+	DPrintf(dLog2, "S%v current state:{state:%v term:%v commitIdx:%v lastApplied:%v firstLog:%v lastLog:%v}", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog())
 	return true
 }
 
@@ -152,20 +154,32 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	defer DPrintf(dLog2, "S%v snapshotfunction called current state:{state:%v term %v commitIdx:%v lastApplied:%v firstLog:%v lastLog:%v}", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog())
 	snapshotIdx := rf.getFirstLog().Index
 	if index <= snapshotIdx {
 		return
 	}
-	rf.shrinkEntries(rf.Entries[index-snapshotIdx:])
+	rf.Entries = shrinkEntries(rf.Entries[index-snapshotIdx:])
 	rf.Entries[0].Payload = nil
 	rf.persister.SaveStateAndSnapshot(rf.EncodeState(), snapshot)
 
 }
 
+type InstallSnapshotRequest struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+type InstallSnapshotResponse struct {
+	Term int
+}
+
 func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, response *InstallSnapshotResponse) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	//DPrintf(dLog, "S%v Install snapshot RPC called, state:{state:%v term:%v commitIdx:%v lastApplied:%v firstLog:%v lastLog:%v} requestArg:%v", rf.me, rf.state, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request)
 
 	response.Term = rf.currentTerm
 	if request.Term < rf.currentTerm {
@@ -237,7 +251,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	// Your code here (2B).
 	entry := rf.appendNewEntry(command)
-	DPrintf(dLeader, "S%v deliver entry:%v", rf.me, entry)
 	rf.BroadcastHeartbeat(false)
 	return entry.Index, entry.Term, true
 }
@@ -321,11 +334,11 @@ func (rf *Raft) AppendEntries(request *AppendEntriesArgs, response *AppendEntrie
 		}
 		return
 	}
-	DPrintf(dLog, "S%v recv AE from S%v currentstate:{CT:%v LastLogIndex:%v LostLogTerm:%v}  requestArgs:{T:%v PrevLogIndex:%v PrevLogTerm:%v }", rf.me, request.LeaderId, rf.currentTerm, rf.getLastLog().Index, rf.getLastLog().Term, request.Term, request.PrevLogIndex, request.PrevLogTerm)
+	//DPrintf(dLog, "S%v recv AE from S%v currentstate:{CT:%v LastLogIndex:%v LostLogTerm:%v}  requestArgs:{T:%v PrevLogIndex:%v PrevLogTerm:%v EntryLen:%v}", rf.me, request.LeaderId, rf.currentTerm, rf.getLastLog().Index, rf.getLastLog().Term, request.Term, request.PrevLogIndex, request.PrevLogTerm, len(rf.Entries))
 	firstIdx := rf.getFirstLog().Index
 	for idx, entry := range request.Entries {
 		if entry.Index-firstIdx >= len(rf.Entries) || rf.Entries[entry.Index-firstIdx].Term != entry.Term {
-			rf.shrinkEntries(append(rf.Entries[:entry.Index-firstIdx], request.Entries[idx:]...))
+			rf.Entries = shrinkEntries(append(rf.Entries[:entry.Index-firstIdx], request.Entries[idx:]...))
 			break
 		}
 	}
@@ -373,8 +386,8 @@ func (rf *Raft) StartElection() {
 }
 
 func (rf *Raft) needReplicate(peer int) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 	return rf.state == Leader && rf.matchIndex[peer] < rf.getLastLog().Index
 }
 func (rf *Raft) createInstallSnapshotRequest() *InstallSnapshotRequest {
@@ -395,12 +408,12 @@ func (rf *Raft) replicateOneRound(peer int) {
 	}
 	prevLogIdx := rf.nextIndex[peer] - 1
 	if prevLogIdx < rf.getFirstLog().Index {
-		//todo
 		request := rf.createInstallSnapshotRequest()
 		rf.mu.RUnlock()
 		response := &InstallSnapshotResponse{}
 		if rf.sendInstallSnapshot(peer, request, response) {
 			rf.mu.Lock()
+			//DPrintf(dLog, "S%v send insatllsnapshot to S%v and replied", rf.me, peer)
 			rf.handleInstallSnapshotResponse(peer, request, response)
 			rf.mu.Unlock()
 
@@ -411,6 +424,7 @@ func (rf *Raft) replicateOneRound(peer int) {
 		response := new(AppendEntriesReply)
 		if rf.sendAppendEntries(peer, request, response) {
 			rf.mu.Lock()
+			//DPrintf(dLog, "S%v send appendEntries to S%v and replied", rf.me, peer)
 			rf.handleAppendEntriesResponse(peer, request, response)
 			rf.mu.Unlock()
 		}
@@ -422,9 +436,9 @@ func (rf *Raft) handleInstallSnapshotResponse(peer int, request *InstallSnapshot
 			rf.changeState(Follower)
 			rf.currentTerm, rf.votedFor = response.Term, -1
 			rf.persist()
+		} else {
+			rf.matchIndex[peer], rf.nextIndex[peer] = request.LastIncludedIndex, request.LastIncludedIndex+1
 		}
-	} else {
-		rf.matchIndex[peer], rf.nextIndex[peer] = request.LastIncludedIndex, request.LastIncludedIndex+1
 	}
 }
 func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest, response *InstallSnapshotResponse) bool {
@@ -509,7 +523,7 @@ func (rf *Raft) applier() {
 				CommandIndex: entry.Index,
 				CommandTerm:  entry.Term,
 			}
-			DPrintf(dClient, "S%v entry:%v applied", rf.me, entry)
+			//DPrintf(dClient, "S%v entry:%v applied", rf.me, entry)
 		}
 		rf.mu.Lock()
 		rf.lastApplied = max(rf.lastApplied, commitIdx)
@@ -637,15 +651,14 @@ func (rf *Raft) updateCommitIdxForFollower(commitIdx int) {
 	}
 }
 
-func (rf *Raft) shrinkEntries(entries []LogEntry) {
+func shrinkEntries(entries []LogEntry) []LogEntry {
 	const lenMultiple = 2
 	if len(entries)*lenMultiple < cap(entries) {
 		newEntries := make([]LogEntry, len(entries))
 		copy(newEntries, entries)
-		rf.Entries = newEntries
-		return
+		return newEntries
 	}
-	rf.Entries = entries
+	return entries
 }
 
 func (rf *Raft) LogUpToDate(logTerm, logIndex int) bool {

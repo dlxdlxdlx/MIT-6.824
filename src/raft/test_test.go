@@ -1032,7 +1032,8 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 	defer cfg.cleanup()
 
 	cfg.begin(name)
-
+	DPrintf(dTrace, "Test begin")
+	//简单测试是否能选举出领导人并正常commit
 	cfg.one(rand.Int(), servers, true)
 	leader1 := cfg.checkOneLeader()
 
@@ -1045,13 +1046,16 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 
 		if disconnect {
+			DPrintf(dLog2, "S%v disconnected remain:%v", victim, servers-1)
 			cfg.disconnect(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 		if crash {
-			cfg.crash1(victim)
+			cfg.crash1(victim) // crashed but persisted information saved
+			DPrintf(dLog2, "S%v crashed remain:%v", victim, servers-1)
 			cfg.one(rand.Int(), servers-1, true)
 		}
+		DPrintf(dLog2, "Start send num:%v entries to create a snapshot", SnapShotInterval+1)
 		// send enough to get a snapshot
 		for i := 0; i < SnapShotInterval+1; i++ {
 			cfg.rafts[sender].Start(rand.Int())
@@ -1060,17 +1064,19 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		cfg.one(rand.Int(), servers-1, true)
 
 		if cfg.LogSize() >= MAXLOGSIZE {
-			cfg.t.Fatalf("Log size too large")
+			cfg.t.Fatalf("Log size too large current:%v MAX:%v", cfg.LogSize(), MAXLOGSIZE)
 		}
 		if disconnect {
 			// reconnect a follower, who maybe behind and
 			// needs to rceive a snapshot to catch up.
 			cfg.connect(victim)
+			DPrintf(dLog2, "S%v reconnected remain:%v", victim, servers)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
 		if crash {
 			cfg.start1(victim, cfg.applierSnap)
+			DPrintf(dLog2, "S%v restarted", victim)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()

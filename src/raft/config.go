@@ -527,7 +527,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd != expectedServers {
-					DPrintf(dTrace, "debug: index:%v nd:%v cmd:%v expectedServer:%v", index, nd, cmd1, expectedServers)
+					//DPrintf(dTrace, "debug: index:%v nd:%v cmd:%v expectedServer:%v", index, nd, cmd1, expectedServers)
 				}
 				if nd > 0 && nd >= expectedServers {
 					// committed
