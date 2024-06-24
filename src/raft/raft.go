@@ -377,7 +377,16 @@ func (rf *Raft) needReplicate(peer int) bool {
 	defer rf.mu.Unlock()
 	return rf.state == Leader && rf.matchIndex[peer] < rf.getLastLog().Index
 }
-
+func (rf *Raft) createInstallSnapshotRequest() *InstallSnapshotRequest {
+	firstLog := rf.getFirstLog()
+	return &InstallSnapshotRequest{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: firstLog.Index,
+		LastIncludedTerm:  firstLog.Term,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+}
 func (rf *Raft) replicateOneRound(peer int) {
 	rf.mu.RLock()
 	if rf.state != Leader {
@@ -387,14 +396,7 @@ func (rf *Raft) replicateOneRound(peer int) {
 	prevLogIdx := rf.nextIndex[peer] - 1
 	if prevLogIdx < rf.getFirstLog().Index {
 		//todo
-		firstLog := rf.getFirstLog()
-		request := &InstallSnapshotRequest{
-			Term:              rf.currentTerm,
-			LeaderId:          rf.me,
-			LastIncludedIndex: firstLog.Index,
-			LastIncludedTerm:  firstLog.Term,
-			Data:              rf.persister.ReadSnapshot(),
-		}
+		request := rf.createInstallSnapshotRequest()
 		rf.mu.RUnlock()
 		response := &InstallSnapshotResponse{}
 		if rf.sendInstallSnapshot(peer, request, response) {
@@ -510,7 +512,7 @@ func (rf *Raft) applier() {
 			DPrintf(dClient, "S%v entry:%v applied", rf.me, entry)
 		}
 		rf.mu.Lock()
-		rf.lastApplied = max(rf.lastApplied, rf.commitIndex)
+		rf.lastApplied = max(rf.lastApplied, commitIdx)
 		rf.mu.Unlock()
 	}
 }
